@@ -510,3 +510,4 @@ details.custom summary { color: var(--accent); font-weight: 600; font-size: 15px
 .pace { display: block; margin-top: 2px; font-weight: 600; }
 .pace.ok { color: var(--good) !important; }
 .pace.behind { color: #e8890c !important; }
+.link.inline { font-size: inherit; letter-spacing: inherit; text-transform: inherit; padding: 0; }

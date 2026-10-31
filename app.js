@@ -516,7 +516,7 @@ async function renderCrew(seq) {
 
   app.innerHTML = `<div class="v-crew">
     <header class="top">
-      <div><p class="eyebrow">Your crew</p><h1>${esc(S.team.name)}</h1></div>
+      <div><p class="eyebrow">Your crew · <button class="link inline" data-act="rename-crew">Rename</button></p><h1>${esc(S.team.name)}</h1></div>
       <button class="av-btn" data-act="profile" data-id="${S.me.id}" aria-label="My profile">${avatar(S.me.id, 'lg')}</button>
     </header>
     ${isDemo ? `<section class="card demo">
@@ -1610,6 +1610,15 @@ const actions = {
     foodChanged();
   },
   'edit-targets': () => openTargetsForm(),
+  'rename-crew': () => formSheet(`<h2>Rename crew</h2>
+    <label class="field"><span>Crew name</span><input name="name" required maxlength="60" value="${esc(S.team.name)}"></label>
+    <button class="btn primary block lg" type="submit">Save</button>`, async f => {
+    const name = f.get('name').trim();
+    await S.db.renameTeam(name);
+    S.team.name = name;
+    toast('Crew renamed');
+    refresh();
+  }),
   coach: el => { closeSheet(); return openCoach(el.dataset.q); },
   recovery: () => openRecoveryForm(),
   board: el => { S.board = el.dataset.lift; return go('crew', { keep: true }); },
@@ -1701,7 +1710,7 @@ function renderOnboard() {
     <p class="or">or</p>
     <form class="card" data-onboard="create">
       <h3>Start a new crew</h3>
-      <label class="field"><span>Crew name</span><input name="name" required maxlength="60" placeholder="Iron Crew"></label>
+      <label class="field"><span>Crew name</span><input name="name" required maxlength="60" placeholder="The Crucible"></label>
       <button class="btn block">Create crew</button>
     </form>
     <button class="link center-block" data-act="signout">Sign out</button>

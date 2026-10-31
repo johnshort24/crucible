@@ -101,6 +101,10 @@ class SupabaseBackend {
     return this.loadMe();
   }
 
+  async renameTeam(name) {
+    check(await this.sb.from('teams').update({ name }).eq('id', this.teamId));
+  }
+
   async leaveTeam() {
     check(await this.sb.rpc('leave_team'));
     this.teamId = null;
@@ -418,6 +422,7 @@ class LocalBackend {
   }
 
   async signOut() {}
+  async renameTeam(name) { this.d.team.name = name; this.save(); }
   async updateProfile({ name, heightIn }) {
     Object.assign(this.member(this.d.me), { name, heightIn: heightIn ?? null });
     this.save();
