@@ -1,7 +1,7 @@
 // Network-first for the app's own files so updates show up right away,
 // with a cached copy as fallback when offline. Data requests (Supabase)
 // are never cached.
-const CACHE = 'crucible-v1';
+const CACHE = 'crucible-v2';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'data.js', 'config.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', e => {
