@@ -157,6 +157,62 @@ class SupabaseBackend {
     check(await this.sb.from('goals').update({ done }).eq('id', id));
   }
 
+  async nutritionGoals() {
+    return check(await this.sb.from('nutrition_goals').select('*')).map(r => ({
+      userId: r.user_id, sex: r.sex, birthYear: r.birth_year, trainingDays: r.training_days, goal: r.goal,
+      targetWeight: r.target_weight == null ? null : +r.target_weight, targetDate: r.target_date,
+      calories: r.calories, protein: r.protein, carbs: r.carbs, fat: r.fat,
+    }));
+  }
+
+  async saveNutritionGoal(g) {
+    const row = {
+      sex: g.sex, birth_year: g.birthYear, training_days: g.trainingDays, goal: g.goal,
+      target_weight: g.targetWeight ?? null, target_date: g.targetDate || null,
+      calories: g.calories ?? null, protein: g.protein ?? null, carbs: g.carbs ?? null, fat: g.fat ?? null,
+    };
+    const updated = check(await this.sb.from('nutrition_goals').update(row).eq('user_id', this.uid).select('user_id'));
+    if (!updated.length) check(await this.sb.from('nutrition_goals').insert(row));
+  }
+
+  async foodLogs(fromDate, toDate) {
+    const rows = check(await this.sb.from('food_logs')
+      .select('id, user_id, eaten_on, meal, name, calories, protein, carbs, fat, created_at')
+      .gte('eaten_on', fromDate).lte('eaten_on', toDate).order('created_at').limit(5000));
+    return rows.map(r => ({
+      id: r.id, userId: r.user_id, date: r.eaten_on, meal: r.meal, name: r.name, calories: r.calories,
+      protein: +r.protein, carbs: +r.carbs, fat: +r.fat, createdAt: r.created_at,
+    }));
+  }
+
+  async addFood(f) {
+    check(await this.sb.from('food_logs').insert({
+      eaten_on: f.date, meal: f.meal, name: f.name, calories: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat,
+    }));
+  }
+
+  async deleteFood(id) {
+    check(await this.sb.from('food_logs').delete().eq('id', id));
+  }
+
+  async recoveryLogs(fromDate, toDate) {
+    const rows = check(await this.sb.from('recovery_logs')
+      .select('id, user_id, logged_on, sleep_hours, soreness, energy')
+      .gte('logged_on', fromDate).lte('logged_on', toDate));
+    return rows.map(r => ({
+      id: r.id, userId: r.user_id, date: r.logged_on,
+      sleep: r.sleep_hours == null ? null : +r.sleep_hours, soreness: r.soreness, energy: r.energy,
+    }));
+  }
+
+  // One check-in per person per day: update today's if it exists.
+  async saveRecovery({ date, sleep, soreness, energy }) {
+    const vals = { sleep_hours: sleep ?? null, soreness: soreness ?? null, energy: energy ?? null };
+    const updated = check(await this.sb.from('recovery_logs').update(vals)
+      .eq('user_id', this.uid).eq('logged_on', date).select('id'));
+    if (!updated.length) check(await this.sb.from('recovery_logs').insert({ ...vals, logged_on: date }));
+  }
+
   async deleteGoal(id) {
     check(await this.sb.from('goals').delete().eq('id', id));
   }
@@ -175,7 +231,7 @@ class SupabaseBackend {
 
   async posts({ before, after, limit = 20 } = {}) {
     let q = this.sb.from('posts')
-      .select('id, user_id, body, event_id, media, created_at, events(title), comments(count), reactions(user_id)')
+      .select('id, user_id, body, event_id, media, exercises, created_at, events(title), comments(count), reactions(user_id)')
       .eq('team_id', this.teamId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -191,6 +247,7 @@ class SupabaseBackend {
       eventTitle: r.events?.title ?? null,
       createdAt: new Date(r.created_at).toISOString(),
       media: r.media.map(m => ({ type: m.type, path: m.path, url: urls.get(m.path) })),
+      exercises: r.exercises ?? [],
       reactCount: r.reactions.length,
       reacted: r.reactions.some(x => x.user_id === this.uid),
       commentCount: r.comments[0]?.count ?? 0,
@@ -204,7 +261,7 @@ class SupabaseBackend {
     return check(await q).map(r => ({ userId: r.user_id, createdAt: r.created_at }));
   }
 
-  async createPost({ body, eventId, files, onProgress }) {
+  async createPost({ body, eventId, exercises = [], files, onProgress }) {
     const media = [];
     try {
       for (const [i, f] of files.entries()) {
@@ -216,7 +273,7 @@ class SupabaseBackend {
         onProgress?.(i + 1, files.length);
       }
       check(await this.sb.from('posts').insert({
-        team_id: this.teamId, body, event_id: eventId || null, media,
+        team_id: this.teamId, body, event_id: eventId || null, media, exercises,
       }));
     } catch (e) {
       if (media.length) await this.sb.storage.from('media').remove(media.map(m => m.path));
@@ -289,6 +346,9 @@ class SupabaseBackend {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lift_entries' }, () => onChange('stats'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'weigh_ins' }, () => onChange('stats'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'goals' }, () => onChange('stats'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'nutrition_goals' }, () => onChange('food'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'food_logs' }, () => onChange('food'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recovery_logs' }, () => onChange('food'))
       .subscribe();
     return () => this.sb.removeChannel(ch);
   }
@@ -296,7 +356,7 @@ class SupabaseBackend {
 
 /* ───────────────────────── Demo (on-device) ───────────────────────── */
 
-const LS_KEY = 'crucible-demo-v2';
+const LS_KEY = 'crucible-demo-v3';
 
 function idb() {
   return new Promise((res, rej) => {
@@ -367,6 +427,26 @@ class LocalBackend {
     this.add('goals', { kind: g.kind, lift: g.lift || null, target: g.target ?? null, text: g.text || null, targetDate: g.targetDate || null, done: false });
   }
   async setGoalDone(id, done) { this.d.goals.find(g => g.id === id).done = done; this.save(); }
+
+  async nutritionGoals() { return Object.values(this.d.ngoals); }
+  async saveNutritionGoal(g) { this.d.ngoals[this.d.me] = { ...g, userId: this.d.me }; this.save(); }
+
+  async foodLogs(fromDate, toDate) {
+    return this.d.food.filter(f => f.date >= fromDate && f.date <= toDate)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async addFood(f) { this.add('food', f); }
+  async deleteFood(id) { this.remove('food', id); }
+
+  async recoveryLogs(fromDate, toDate) {
+    return this.d.recovery.filter(r => r.date >= fromDate && r.date <= toDate);
+  }
+
+  async saveRecovery(r) {
+    const cur = this.d.recovery.find(x => x.userId === this.d.me && x.date === r.date);
+    if (cur) { Object.assign(cur, r); this.save(); } else this.add('recovery', r);
+  }
   async deleteGoal(id) { this.remove('goals', id); }
 
   async reset() {
@@ -406,7 +486,7 @@ class LocalBackend {
       .map(({ userId, createdAt }) => ({ userId, createdAt }));
   }
 
-  async createPost({ body, eventId, files, onProgress }) {
+  async createPost({ body, eventId, exercises = [], files, onProgress }) {
     const media = [];
     for (const [i, f] of files.entries()) {
       const key = uuid();
@@ -415,7 +495,7 @@ class LocalBackend {
       onProgress?.(i + 1, files.length);
     }
     this.d.posts.push({
-      id: uuid(), userId: this.d.me, body, eventId: eventId || null, media,
+      id: uuid(), userId: this.d.me, body, eventId: eventId || null, media, exercises,
       createdAt: new Date().toISOString(),
     });
     this.save();
@@ -567,9 +647,38 @@ function seed() {
     if (mi % 2 === 0) goals.push({ id: `g${mi}b`, userId: m.id, kind: 'text', lift: null, target: null, text: 'Run a sub-25 minute 5K', targetDate: null, done: false, createdAt: stamp(day(-20)) });
   });
 
+  // Nutrition: targets, two days of meals and recovery check-ins for the sample crew.
+  const foods = {
+    breakfast: [['3 eggs + 2 slices toast', 430, 25, 30, 22], ['Oatmeal with whey + banana', 520, 38, 80, 8], ['Greek yogurt + berries', 260, 24, 30, 4]],
+    lunch: [['Chipotle chicken bowl', 750, 55, 80, 22], ['Turkey sandwich + chips', 680, 38, 75, 24], ['Chicken, rice + broccoli', 620, 52, 70, 12]],
+    dinner: [['Steak, potatoes + salad', 820, 60, 55, 38], ['Salmon + rice', 700, 45, 65, 25], ['Spaghetti with meat sauce', 780, 42, 95, 24]],
+    snack: [['Protein shake', 160, 30, 4, 2], ['Protein bar', 210, 20, 22, 7], ['Apple + peanut butter', 290, 7, 28, 16]],
+  };
+  const ngoals = {};
+  const food = [];
+  const recovery = [];
+  const hourNow = new Date().getHours();
+  members.slice(1).forEach((m, mi) => {
+    ngoals[m.id] = {
+      userId: m.id, sex: 'male', birthYear: 1990 + Math.floor(rand() * 10), trainingDays: 4 + (mi % 3),
+      goal: ['cut', 'bulk', 'maintain'][mi % 3], targetWeight: null, targetDate: null,
+      calories: null, protein: null, carbs: null, fat: null,
+    };
+    for (const d of [-1, 0]) {
+      const meals = d < 0 ? ['breakfast', 'lunch', 'snack', 'dinner'] : ['breakfast', 'lunch', 'snack', 'dinner'].slice(0, hourNow < 11 ? 1 : hourNow < 15 ? 2 : hourNow < 19 ? 3 : 4);
+      meals.forEach((meal, k) => {
+        const [name, calories, protein, carbs, fat] = foods[meal][Math.floor(rand() * 3)];
+        const t = day(d);
+        t.setHours(7 + k * 4);
+        food.push({ id: `f${mi}${d}${k}`, userId: m.id, date: ymd(day(d)), meal, name, calories, protein, carbs, fat, createdAt: t.toISOString() });
+      });
+      recovery.push({ id: `r${mi}${d}`, userId: m.id, date: ymd(day(d)), sleep: 5.5 + Math.floor(rand() * 6) / 2, soreness: 1 + Math.floor(rand() * 4), energy: 2 + Math.floor(rand() * 4), createdAt: stamp(day(d)) });
+    }
+  });
+
   return {
     me: 'me',
     team: { id: 'demo', name: 'Iron Crew', code: 'DEMO42' },
-    members, events, posts, reactions, comments, lifts, weighins, goals,
+    members, events, posts, reactions, comments, lifts, weighins, goals, ngoals, food, recovery,
   };
 }

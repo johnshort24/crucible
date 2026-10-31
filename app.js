@@ -41,6 +41,8 @@ const S = {
   events: new Map(),
   tab: 'today',
   board: 'total',
+  nDay: null,   // null = today
+  nUser: null,  // whose nutrition is shown; null = me
   stats: null,
   calMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   calDay: todayYmd(),
@@ -102,6 +104,7 @@ const icon = {
   clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   camera: '<svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  food: '<svg viewBox="0 0 24 24"><path d="M7 3v8M4.5 3v5a2.5 2.5 0 0 0 5 0V3M7 11v10M18 3c-2.2 1-3.5 3.6-3.5 7.5H18V21"/></svg>',
   more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
 };
 
@@ -147,12 +150,13 @@ function closeSheet(el) {
 }
 
 /* ── Navigation ── */
-const views = { today: renderToday, feed: renderFeed, calendar: renderCalendar, crew: renderCrew };
+const views = { today: renderToday, feed: renderFeed, calendar: renderCalendar, nutrition: renderNutrition, crew: renderCrew };
+const nDay = () => S.nDay ?? todayYmd();
 let renderSeq = 0;
 
 async function go(tab, { keep = false } = {}) {
   S.tab = tab;
-  tabbar.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  tabbar.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === (tab === 'calendar' ? 'today' : tab)));
   const seq = ++renderSeq;
   if (!keep) {
     window.scrollTo(0, 0);
@@ -206,6 +210,22 @@ function mediaGrid(p) {
     </button>`).join('')}</div>`;
 }
 
+function exerciseList(list = []) {
+  if (!list.length) return '';
+  return `<ul class="ex-done">${list.map(x => {
+    const sr = x.sets && x.reps ? `${x.sets} × ${esc(String(x.reps))}` : x.sets ? `${x.sets} sets` : x.reps ? `${esc(String(x.reps))} reps` : '';
+    return `<li><b>${esc(x.name)}</b><span>${[sr, x.weight ? `${num(x.weight)} lb` : ''].filter(Boolean).join(' @ ')}</span></li>`;
+  }).join('')}</ul>`;
+}
+
+// "Bench press 5×5" → { name: 'Bench press', sets: 5, reps: 5 }
+function parsePlan(details) {
+  return (details || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+    const m = l.match(/^(.*?)[\s:-]+(\d+)\s*[×xX]\s*(\d+|AMRAP)?/i);
+    return m ? { name: m[1].trim(), sets: +m[2], reps: m[3] && /\d/.test(m[3]) ? +m[3] : null } : { name: l, sets: null, reps: null };
+  });
+}
+
 function postCard(p) {
   S.posts.set(p.id, p);
   const mine = p.userId === S.me.id;
@@ -217,6 +237,7 @@ function postCard(p) {
     </header>
     ${p.eventTitle ? `<span class="tag">🏋️ ${esc(p.eventTitle)}</span>` : ''}
     ${p.body ? `<p class="body">${esc(p.body)}</p>` : ''}
+    ${exerciseList(p.exercises)}
     ${mediaGrid(p)}
     <footer class="post-f">
       <button class="chip ${p.reacted ? 'on' : ''}" data-act="react" data-id="${p.id}" aria-label="Flex">💪 <span>${p.reactCount || ''}</span></button>
@@ -242,12 +263,18 @@ async function renderToday(seq) {
   const now = new Date();
   const today = ymd(now);
   const start = startOfDay(now);
-  const [events, posts, act] = await Promise.all([
+  const [events, posts, act, food, ngoals, stats] = await Promise.all([
     S.db.events(today, ymd(addDays(now, 7))),
     S.db.posts({ after: start.toISOString(), limit: 200 }),
     S.db.activity(addDays(start, -60).toISOString()),
+    S.db.foodLogs(today, today),
+    S.db.nutritionGoals(),
+    S.db.stats(),
   ]);
   if (stale(seq)) return;
+  S.stats = stats;
+  const fuelT = targetsFor(S.me.id, ngoals, stats);
+  const fuel = sumFood(food.filter(f => f.userId === S.me.id));
 
   const todays = events.filter(e => e.date === today);
   const workouts = todays.filter(e => e.kind === 'workout');
@@ -296,7 +323,10 @@ async function renderToday(seq) {
     <header class="top">
       <div><p class="eyebrow">${fmt(now, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
       <h1>${greet}, ${esc(S.me.name.split(' ')[0])}</h1></div>
-      <button class="av-btn" data-act="profile" data-id="${S.me.id}" aria-label="My profile">${avatar(S.me.id, 'lg')}</button>
+      <div class="top-actions">
+        <button class="icon-btn round" data-act="tab" data-tab="calendar" aria-label="Calendar">${icon.calendar}</button>
+        <button class="av-btn" data-act="profile" data-id="${S.me.id}" aria-label="My profile">${avatar(S.me.id, 'lg')}</button>
+      </div>
     </header>
 
     <div class="stats">
@@ -306,6 +336,16 @@ async function renderToday(seq) {
     </div>
 
     ${workoutCards}
+
+    <button class="card fuel-mini" data-act="nutrition-me">
+      <span class="grow">
+        <p class="eyebrow">Today's fuel</p>
+        ${fuelT ? `<b>${num(fuel.calories)} <small>/ ${num(fuelT.calories)} kcal</small></b>
+          ${macroBar('Protein', fuel.protein, fuelT.protein)}`
+          : `<b>Set your nutrition targets</b><small class="muted">Calories and macros for your goal</small>`}
+      </span>
+      <span class="chev">${icon.chevR}</span>
+    </button>
 
     <section class="card">
       <div class="sec-h"><h3>Crew check-in</h3><span class="muted">${done} of ${members.length} done</span></div>
@@ -394,7 +434,7 @@ async function renderCalendar(seq) {
 
   app.innerHTML = `<div class="v-calendar">
     <header class="top">
-      <div><p class="eyebrow">${m.getFullYear()}</p><h1>${fmt(m, { month: 'long' })}</h1></div>
+      <div><button class="link back" data-act="tab" data-tab="today">${icon.chevL}Today</button><h1>${fmt(m, { month: 'long' })}${m.getFullYear() !== new Date().getFullYear() ? ` <span class="yr">${m.getFullYear()}</span>` : ''}</h1></div>
       <div class="top-actions">
         <button class="icon-btn round" data-act="cal-move" data-n="-1" aria-label="Previous month">${icon.chevL}</button>
         <button class="btn sm" data-act="cal-today">Today</button>
@@ -741,6 +781,290 @@ async function maybeSetup() {
   });
 }
 
+/* ── Nutrition ── */
+const MEALS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snacks']];
+const GOALS = [['cut', 'Lose fat'], ['maintain', 'Maintain'], ['bulk', 'Build muscle']];
+const ACTIVITY = [1.2, 1.3, 1.375, 1.45, 1.55, 1.6, 1.725, 1.8]; // by training days per week
+const r10 = n => Math.round(n / 10) * 10;
+
+// Daily calorie and macro targets. Mifflin-St Jeor for resting burn, scaled by training
+// days, then adjusted for the goal (paced to the target date when there is one).
+// Protein is 1 g per lb (goal weight when cutting), fat 25% of calories, carbs the rest.
+function calcTargets({ sex, birthYear, trainingDays, goal, targetWeight, targetDate, weight, heightIn, calories, protein, carbs, fat }) {
+  let auto = null;
+  if (sex && birthYear && weight && heightIn) {
+    const age = new Date().getFullYear() - birthYear;
+    const bmr = 10 * weight * 0.4536 + 6.25 * heightIn * 2.54 - 5 * age + (sex === 'male' ? 5 : -161);
+    const tdee = bmr * ACTIVITY[trainingDays ?? 3];
+    let adj = { cut: -500, maintain: 0, bulk: 300 }[goal] ?? 0;
+    const weeks = targetDate ? (parseYmd(targetDate) - startOfDay(new Date())) / (7 * 864e5) : 0;
+    if (goal !== 'maintain' && targetWeight && weeks > 1) {
+      adj = (targetWeight - weight) / weeks * 500;
+      adj = goal === 'cut' ? Math.min(-250, Math.max(-750, adj)) : Math.max(150, Math.min(400, adj));
+    }
+    const kcal = r10(tdee + adj);
+    const p = Math.round(goal === 'cut' && targetWeight ? Math.min(weight, targetWeight) : weight);
+    const f = Math.round(kcal * 0.25 / 9);
+    auto = { calories: kcal, protein: p, fat: f, carbs: Math.max(0, Math.round((kcal - p * 4 - f * 9) / 4)), tdee: r10(tdee), perWeek: Math.round(adj / 500 * 10) / 10 };
+  }
+  if (!auto && !calories) return null;
+  const t = { ...(auto ?? { calories: 0, protein: 0, carbs: 0, fat: 0 }) };
+  if (calories) t.calories = calories;
+  if (protein != null) t.protein = protein;
+  if (carbs != null) t.carbs = carbs;
+  if (fat != null) t.fat = fat;
+  t.custom = [calories, protein, carbs, fat].some(v => v != null);
+  return t;
+}
+
+function targetsFor(uid, ngoals, stats) {
+  const g = ngoals.find(x => x.userId === uid);
+  if (!g) return null;
+  return calcTargets({ ...g, weight: latestWeighIn(stats, uid)?.weight, heightIn: S.members.get(uid)?.heightIn });
+}
+
+const sumFood = list => list.reduce((t, f) => ({
+  calories: t.calories + f.calories, protein: t.protein + f.protein, carbs: t.carbs + f.carbs, fat: t.fat + f.fat,
+}), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+
+const defaultMeal = () => { const h = new Date().getHours(); return h < 11 ? 'breakfast' : h < 15 ? 'lunch' : h < 17 ? 'snack' : h < 21 ? 'dinner' : 'snack'; };
+
+function macroBar(label, have, want, unit = 'g') {
+  const pct = want ? Math.min(100, Math.round(have / want * 100)) : 0;
+  return `<div class="mbar">
+    <div class="mbar-top"><b>${label}</b><span>${num(Math.round(have))}${want ? ` / ${num(want)}` : ''} ${unit}</span></div>
+    <div class="progress"><span style="width:${pct}%"></span></div>
+  </div>`;
+}
+
+async function renderNutrition(seq) {
+  const day = nDay();
+  const [stats, ngoals, food, recov] = await Promise.all([
+    S.db.stats(), S.db.nutritionGoals(), S.db.foodLogs(day, day), S.db.recoveryLogs(day, day),
+  ]);
+  if (stale(seq)) return;
+  S.stats = stats;
+  const uid = S.members.has(S.nUser) ? S.nUser : S.me.id;
+  const mine = uid === S.me.id;
+  const who = mine ? 'You' : esc(nameOf(uid).split(' ')[0]);
+  const t = targetsFor(uid, ngoals, stats);
+  const g = ngoals.find(x => x.userId === uid);
+  const mineFood = food.filter(f => f.userId === uid);
+  const tot = sumFood(mineFood);
+  const rec = recov.find(r => r.userId === uid);
+  const isToday = day === todayYmd();
+  const label = isToday ? 'Today' : day === ymd(addDays(new Date(), -1)) ? 'Yesterday' : fmt(parseYmd(day), { weekday: 'short', month: 'short', day: 'numeric' });
+  const left = t ? t.calories - tot.calories : 0;
+  const pct = t?.calories ? Math.min(100, tot.calories / t.calories * 100) : 0;
+
+  const targetsCard = t ? `<section class="card fuel">
+      <div class="ring" style="--p:${pct}"><div><b>${num(tot.calories)}</b><small>of ${num(t.calories)} kcal</small></div></div>
+      <div class="grow">
+        <p class="left ${left < 0 ? 'over' : ''}">${left >= 0 ? `${num(left)} kcal left` : `${num(-left)} kcal over`}</p>
+        ${macroBar('Protein', tot.protein, t.protein)}
+        ${macroBar('Carbs', tot.carbs, t.carbs)}
+        ${macroBar('Fat', tot.fat, t.fat)}
+      </div>
+    </section>
+    <p class="goal-line muted">${g ? `${GOALS.find(([k]) => k === g.goal)?.[1]}${g.targetWeight ? ` → ${num(g.targetWeight)} lb` : ''}${g.targetDate ? ` by ${fmtShortDate(g.targetDate)}` : ''}${t.custom ? ' · custom targets' : t.perWeek ? ` · ${t.perWeek > 0 ? '+' : ''}${t.perWeek} lb/week` : ''}` : ''}
+      ${mine ? '<button class="link" data-act="edit-targets">Edit targets</button>' : ''}</p>`
+    : `<section class="card hero rest">
+      <p class="eyebrow">Daily targets</p>
+      <h2>${mine ? 'Set your targets' : 'No targets yet'}</h2>
+      <p class="meta">${mine ? 'Answer a few questions and Crucible works out your calories, protein, carbs and fat for your goal.' : `${who} hasn't set up nutrition targets.`}</p>
+      ${mine ? '<button class="btn primary block" data-act="edit-targets">Set my targets</button>' : ''}
+      ${tot.calories ? `<div class="totals">${num(tot.calories)} kcal · ${num(Math.round(tot.protein))} P · ${num(Math.round(tot.carbs))} C · ${num(Math.round(tot.fat))} F</div>` : ''}
+    </section>`;
+
+  const crewRows = [...S.members.values()].map(m => {
+    const mt = targetsFor(m.id, ngoals, stats);
+    const s = sumFood(food.filter(f => f.userId === m.id));
+    const hit = mt && s.protein >= mt.protein * 0.95;
+    return { m, mt, s, hit };
+  }).sort((a, b) => b.s.calories - a.s.calories);
+
+  app.innerHTML = `<div class="v-nutrition">
+    <header class="top">
+      <div><p class="eyebrow">Nutrition${mine ? '' : ` · ${esc(nameOf(uid))}`}</p><h1>${label}</h1></div>
+      <div class="top-actions">
+        <button class="icon-btn round" data-act="n-day" data-n="-1" aria-label="Previous day">${icon.chevL}</button>
+        ${isToday ? '' : '<button class="btn sm" data-act="n-today">Today</button>'}
+        <button class="icon-btn round" data-act="n-day" data-n="1" aria-label="Next day" ${isToday ? 'disabled' : ''}>${icon.chevR}</button>
+      </div>
+    </header>
+
+    <div class="chips-scroll people">
+      ${[...S.members.values()].sort((a, b) => (b.id === S.me.id) - (a.id === S.me.id) || a.name.localeCompare(b.name)).map(m => `<button class="chip ${m.id === uid ? 'on' : ''}" data-act="n-user" data-id="${m.id}">${avatar(m.id, 'xs')}${esc(m.id === S.me.id ? 'You' : m.name.split(' ')[0])}</button>`).join('')}
+    </div>
+
+    ${targetsCard}
+
+    <section class="card list">
+      <div class="sec-h"><h3>Meals</h3>${mine ? `<button class="btn sm primary" data-act="add-food">${icon.plus}Add food</button>` : ''}</div>
+      ${MEALS.map(([k, l]) => {
+        const items = mineFood.filter(f => f.meal === k);
+        if (!items.length && !mine) return '';
+        return `<div class="meal">
+          <div class="meal-h"><b>${l}</b><span class="muted">${items.length ? `${num(sumFood(items).calories)} kcal` : ''}</span>
+            ${mine ? `<button class="link" data-act="add-food" data-meal="${k}">+ Add</button>` : ''}</div>
+          ${items.map(f => `<div class="food">
+            <span class="grow"><b>${esc(f.name)}</b><small>${num(f.protein)} P · ${num(f.carbs)} C · ${num(f.fat)} F</small></span>
+            <span class="kcal">${num(f.calories)}</span>
+            ${mine ? `<button class="icon-btn" data-act="del-food" data-id="${f.id}" aria-label="Delete">✕</button>` : ''}
+          </div>`).join('')}
+        </div>`;
+      }).join('') || `<p class="muted pad">${who} hasn't logged any food ${isToday ? 'today' : 'this day'}.</p>`}
+    </section>
+
+    <section class="card">
+      <div class="sec-h"><h3>Recovery</h3>${mine ? `<button class="link" data-act="recovery">${rec ? 'Update' : 'Check in'}</button>` : ''}</div>
+      ${rec ? `<div class="recov">
+        <div><b>${rec.sleep != null ? num(rec.sleep) : '—'}<span>h</span></b><small>Sleep</small></div>
+        <div><b>${rec.soreness ?? '—'}<span>/5</span></b><small>Soreness</small></div>
+        <div><b>${rec.energy ?? '—'}<span>/5</span></b><small>Energy</small></div>
+      </div>` : `<p class="muted">${mine ? 'How did you sleep, how sore are you, how is your energy? Takes 10 seconds.' : 'No check-in.'}</p>`}
+    </section>
+
+    <section class="card list">
+      <div class="sec-h"><h3>Crew ${isToday ? 'today' : 'this day'}</h3><span class="muted">Calories · protein</span></div>
+      ${crewRows.map(({ m, mt, s, hit }) => `<button class="row" data-act="n-user" data-id="${m.id}">
+        ${avatar(m.id)}
+        <span class="grow"><b>${esc(m.id === S.me.id ? 'You' : m.name)}</b>
+          <small>${num(s.calories)}${mt ? ` / ${num(mt.calories)}` : ''} kcal · ${num(Math.round(s.protein))}${mt ? ` / ${num(mt.protein)}` : ''} g protein</small></span>
+        ${hit ? '<span class="pr ok">Protein ✓</span>' : ''}
+      </button>`).join('')}
+    </section>
+  </div>`;
+}
+
+function foodChanged() {
+  S.dirty = true;
+  if (S.tab === 'nutrition' || S.tab === 'today') refresh();
+}
+
+async function openFoodForm(meal = defaultMeal()) {
+  const recent = (await S.db.foodLogs(ymd(addDays(new Date(), -45)), todayYmd()))
+    .filter(f => f.userId === S.me.id).reverse();
+  const seen = new Set();
+  const quick = recent.filter(f => !seen.has(f.name.toLowerCase()) && seen.add(f.name.toLowerCase())).slice(0, 12);
+  const sheet = formSheet(`<h2>Add food</h2>
+    <div class="seg" role="radiogroup" aria-label="Meal">
+      ${MEALS.map(([k, l]) => `<label><input type="radio" name="meal" value="${k}" ${k === meal ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+    </div>
+    ${quick.length ? `<p class="field-label">Recent</p><div class="chips-scroll quick">${quick.map((f, i) => `<button type="button" class="chip" data-quick="${i}">${esc(f.name)}</button>`).join('')}</div>` : ''}
+    <label class="field"><span>What did you eat?</span><input name="name" required maxlength="120" placeholder="Chicken, rice + broccoli"></label>
+    <div class="two">
+      <label class="field"><span>Calories</span>${numIn('calories', '600', 'required')}</label>
+      <label class="field"><span>Protein (g)</span>${numIn('protein', '45')}</label>
+      <label class="field"><span>Carbs (g)</span>${numIn('carbs', '60')}</label>
+      <label class="field"><span>Fat (g)</span>${numIn('fat', '15')}</label>
+    </div>
+    <p class="hint">Tip: food labels and restaurant nutrition pages list these. AI estimates from a description or photo are coming in the next update.</p>
+    <button class="btn primary block lg" type="submit">Add</button>`, async f => {
+    await S.db.addFood({
+      date: nDay(), meal: f.get('meal'), name: f.get('name').trim(),
+      calories: Math.round(+f.get('calories') || 0), protein: +f.get('protein') || 0, carbs: +f.get('carbs') || 0, fat: +f.get('fat') || 0,
+    });
+    toast('Logged');
+    foodChanged();
+  });
+  sheet.addEventListener('click', e => {
+    const q = e.target.closest('[data-quick]');
+    if (!q) return;
+    const f = quick[+q.dataset.quick];
+    const form = $('form', sheet);
+    form.elements.name.value = f.name;
+    for (const k of ['calories', 'protein', 'carbs', 'fat']) form.elements[k].value = f[k];
+  });
+}
+
+async function openTargetsForm() {
+  const [ngoals, stats] = await Promise.all([S.db.nutritionGoals(), S.db.stats()]);
+  const g = ngoals.find(x => x.userId === S.me.id) ?? { goal: 'maintain', trainingDays: 4 };
+  const weight = latestWeighIn(stats, S.me.id)?.weight;
+  const heightIn = S.members.get(S.me.id)?.heightIn;
+  const val = v => v ?? '';
+  const sheet = formSheet(`<h2>Nutrition targets</h2>
+    <div class="seg" role="radiogroup" aria-label="Goal">
+      ${GOALS.map(([k, l]) => `<label><input type="radio" name="goal" value="${k}" ${g.goal === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+    </div>
+    <div class="seg" role="radiogroup" aria-label="Sex">
+      <label><input type="radio" name="sex" value="male" ${g.sex !== 'female' ? 'checked' : ''}><span>Male</span></label>
+      <label><input type="radio" name="sex" value="female" ${g.sex === 'female' ? 'checked' : ''}><span>Female</span></label>
+    </div>
+    <div class="two">
+      <label class="field"><span>Birth year</span>${numIn('birthYear', '1995', `required value="${val(g.birthYear)}"`)}</label>
+      <label class="field"><span>Training days / week</span><select name="trainingDays">${[0, 1, 2, 3, 4, 5, 6, 7].map(n => `<option ${n === (g.trainingDays ?? 4) ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      <label class="field"><span>Current weight (lb)</span>${numIn('weight', '195', `required value="${val(weight)}"`)}</label>
+      <label class="field" data-hide="maintain"><span>Goal weight (lb)</span>${numIn('targetWeight', '185', `value="${val(g.targetWeight)}"`)}</label>
+    </div>
+    ${heightIn ? '' : heightFields(null)}
+    <label class="field" data-hide="maintain"><span>Reach it by <em>optional</em></span><input type="date" name="targetDate" value="${val(g.targetDate)}"></label>
+    <div class="preview card"></div>
+    <details class="custom" ${[g.calories, g.protein, g.carbs, g.fat].some(v => v != null) ? 'open' : ''}>
+      <summary>Use my own numbers instead</summary>
+      <div class="two">
+        <label class="field"><span>Calories</span>${numIn('calories', 'auto', `value="${val(g.calories)}"`)}</label>
+        <label class="field"><span>Protein (g)</span>${numIn('protein', 'auto', `value="${val(g.protein)}"`)}</label>
+        <label class="field"><span>Carbs (g)</span>${numIn('carbs', 'auto', `value="${val(g.carbs)}"`)}</label>
+        <label class="field"><span>Fat (g)</span>${numIn('fat', 'auto', `value="${val(g.fat)}"`)}</label>
+      </div>
+    </details>
+    <button class="btn primary block lg" type="submit">Save targets</button>`, async f => {
+    const goal = readGoalForm(f);
+    if (!heightIn) await S.db.updateProfile({ name: S.me.name, heightIn: readHeight(f) });
+    if (+f.get('weight') !== weight) await S.db.addWeighIn({ weight: +f.get('weight'), date: todayYmd() });
+    await S.db.saveNutritionGoal(goal);
+    await loadMembers();
+    toast('Targets saved');
+    foodChanged();
+  });
+  const form = $('form', sheet);
+  const update = () => {
+    const f = new FormData(form);
+    const goal = readGoalForm(f);
+    sheet.querySelectorAll('[data-hide]').forEach(el => { el.hidden = goal.goal === el.dataset.hide; });
+    const t = calcTargets({ ...goal, weight: +f.get('weight') || null, heightIn: heightIn ?? readHeight(f) });
+    $('.preview', sheet).innerHTML = t
+      ? `<p class="eyebrow">Your daily targets</p><p class="pv-kcal">${num(t.calories)} kcal</p>
+         <p>${num(t.protein)} g protein · ${num(t.carbs)} g carbs · ${num(t.fat)} g fat</p>
+         ${t.tdee && !t.custom ? `<p class="muted small">You burn about ${num(t.tdee)} kcal a day${t.perWeek ? `. This pace is ${t.perWeek > 0 ? '+' : ''}${t.perWeek} lb per week.` : '.'}</p>` : ''}`
+      : '<p class="muted">Fill in your details to see your targets.</p>';
+  };
+  form.addEventListener('input', update);
+  form.addEventListener('change', update);
+  update();
+}
+
+function readGoalForm(f) {
+  const n = k => (f.get(k) === '' || f.get(k) == null ? null : +f.get(k));
+  const goal = f.get('goal');
+  return {
+    goal, sex: f.get('sex'), birthYear: n('birthYear'), trainingDays: +f.get('trainingDays'),
+    targetWeight: goal === 'maintain' ? null : n('targetWeight'), targetDate: goal === 'maintain' ? null : f.get('targetDate') || null,
+    calories: n('calories'), protein: n('protein'), carbs: n('carbs'), fat: n('fat'),
+  };
+}
+
+async function openRecoveryForm() {
+  const rec = (await S.db.recoveryLogs(nDay(), nDay())).find(r => r.userId === S.me.id) ?? {};
+  const scale = (name, cur, lo, hi) => `<div class="seg scale" role="radiogroup" aria-label="${name}">
+    ${[1, 2, 3, 4, 5].map(v => `<label><input type="radio" name="${name}" value="${v}" ${cur === v ? 'checked' : ''}><span>${v}</span></label>`).join('')}
+  </div><p class="scale-ends muted small"><span>${lo}</span><span>${hi}</span></p>`;
+  formSheet(`<h2>Recovery check-in</h2>
+    <label class="field"><span>Hours of sleep last night</span>${numIn('sleep', '7.5', `value="${rec.sleep ?? ''}" step="0.5"`)}</label>
+    <p class="field-label">Soreness</p>${scale('soreness', rec.soreness, 'Fresh', 'Wrecked')}
+    <p class="field-label">Energy</p>${scale('energy', rec.energy, 'Drained', 'Fired up')}
+    <button class="btn primary block lg" type="submit">Save</button>`, async f => {
+    await S.db.saveRecovery({
+      date: nDay(), sleep: f.get('sleep') === '' ? null : +f.get('sleep'),
+      soreness: f.get('soreness') ? +f.get('soreness') : null, energy: f.get('energy') ? +f.get('energy') : null,
+    });
+    toast('Checked in');
+    foodChanged();
+  });
+}
+
 /* ── Post detail & comments ── */
 async function openPost(id) {
   const p = S.posts.get(id);
@@ -856,8 +1180,14 @@ async function openComposer(eventId) {
         <option value="" ${eventId ? '' : 'selected'}>Something else / my own</option>
       </select>
     </label>
-    <label class="field"><span>What did you do?</span>
-      <textarea name="body" rows="5" maxlength="4000" placeholder="Sets, reps, weights, how it felt…"></textarea>
+    <div class="ex-sec">
+      <p class="field-label">Exercises <em>optional</em></p>
+      <div class="ex-head"><span>Exercise</span><span>Sets</span><span>Reps</span><span>lb</span><span></span></div>
+      <div class="ex-list"></div>
+      <button type="button" class="btn ghost sm" data-ex-add>${icon.plus}Add exercise</button>
+    </div>
+    <label class="field"><span>Notes</span>
+      <textarea name="body" rows="3" maxlength="4000" placeholder="How it felt, PRs, anything else…"></textarea>
     </label>
     <div class="previews"></div>
     <label class="btn ghost block add-media">${icon.camera} Add photos or videos
@@ -868,6 +1198,33 @@ async function openComposer(eventId) {
   </form>`);
   const form = $('form', sheet);
   const previews = $('.previews', sheet);
+  const exList = $('.ex-list', sheet);
+  let exTouched = false;
+  const exRow = (x = {}) => `<div class="ex-row">
+    <input name="exName" maxlength="60" placeholder="Bench press" value="${esc(x.name ?? '')}" aria-label="Exercise">
+    <input name="exSets" type="number" inputmode="numeric" min="0" max="99" value="${x.sets ?? ''}" aria-label="Sets">
+    <input name="exReps" maxlength="10" inputmode="numeric" value="${esc(x.reps ?? '')}" aria-label="Reps">
+    <input name="exWeight" type="number" inputmode="decimal" step="any" min="0" value="${x.weight ?? ''}" aria-label="Weight in lb">
+    <button type="button" class="icon-btn" data-ex-del aria-label="Remove exercise">✕</button>
+  </div>`;
+  const prefill = () => {
+    if (exTouched) return;
+    const ev = workouts.find(w => w.id === form.event.value);
+    exList.innerHTML = ev ? parsePlan(ev.details).map(exRow).join('') : '';
+  };
+  prefill();
+  form.event.addEventListener('change', prefill);
+  exList.addEventListener('input', () => { exTouched = true; });
+  sheet.addEventListener('click', e => {
+    if (e.target.closest('[data-ex-add]')) { exList.insertAdjacentHTML('beforeend', exRow()); exTouched = true; exList.lastElementChild.querySelector('input').focus(); }
+    const del = e.target.closest('[data-ex-del]');
+    if (del) { del.closest('.ex-row').remove(); exTouched = true; }
+  });
+  const readExercises = () => [...exList.querySelectorAll('.ex-row')].map(r => {
+    const v = n => r.querySelector(`[name=${n}]`).value.trim();
+    const reps = v('exReps');
+    return { name: v('exName'), sets: +v('exSets') || null, reps: reps === '' ? null : (/^\d+$/.test(reps) ? +reps : reps), weight: +v('exWeight') || null };
+  }).filter(x => x.name && (x.sets || x.reps || x.weight));
 
   const drawPreviews = () => {
     previews.innerHTML = files.map((f, i) => `<div class="pv">
@@ -904,13 +1261,14 @@ async function openComposer(eventId) {
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const body = form.body.value.trim();
-    if (!body && !files.length) return toast('Add a note or a photo first', true);
+    const exercises = readExercises();
+    if (!body && !files.length && !exercises.length) return toast('Add your sets, a note or a photo first', true);
     const btn = $('button[type=submit]', form);
     btn.disabled = true;
     btn.textContent = files.length ? `Uploading 0/${files.length}…` : 'Posting…';
     try {
       await S.db.createPost({
-        body, eventId: form.event.value || null, files,
+        body, eventId: form.event.value || null, exercises, files,
         onProgress: (i, n) => { btn.textContent = `Uploading ${i}/${n}…`; },
       });
       files.forEach(f => URL.revokeObjectURL(f.url));
@@ -1080,6 +1438,21 @@ const actions = {
     location.reload();
   },
   profile: (el, id) => openProfile(id),
+  'nutrition-me': () => { S.nUser = null; S.nDay = null; return go('nutrition'); },
+  'n-user': (el, id) => { closeSheet(); S.nUser = id === S.me.id ? null : id; return go('nutrition'); },
+  'n-day': el => {
+    const d = ymd(addDays(parseYmd(nDay()), +el.dataset.n));
+    S.nDay = d >= todayYmd() ? null : d;
+    return go('nutrition', { keep: true });
+  },
+  'n-today': () => { S.nDay = null; return go('nutrition', { keep: true }); },
+  'add-food': el => openFoodForm(el.dataset.meal),
+  'del-food': async (el, id) => {
+    await S.db.deleteFood(id);
+    foodChanged();
+  },
+  'edit-targets': () => openTargetsForm(),
+  recovery: () => openRecoveryForm(),
   board: el => { S.board = el.dataset.lift; return go('crew', { keep: true }); },
   'edit-profile': () => openEditProfile(),
   'log-lift': el => openLiftForm(el.dataset.lift),
@@ -1212,7 +1585,7 @@ tabbar.innerHTML = `
   <button data-act="tab" data-tab="today">${icon.today}<span>Today</span></button>
   <button data-act="tab" data-tab="feed">${icon.feed}<span>Feed</span></button>
   <button class="fab" data-act="compose" aria-label="Log workout">${icon.plus}</button>
-  <button data-act="tab" data-tab="calendar">${icon.calendar}<span>Calendar</span></button>
+  <button data-act="tab" data-tab="nutrition">${icon.food}<span>Nutrition</span></button>
   <button data-act="tab" data-tab="crew">${icon.crew}<span>Crew</span></button>`;
 
 document.addEventListener('visibilitychange', () => {

@@ -42,6 +42,7 @@ create table public.posts (
   body        text not null default '' check (char_length(body) <= 4000),
   event_id    uuid references public.events(id) on delete set null,
   media       jsonb not null default '[]'::jsonb,
+  exercises   jsonb not null default '[]'::jsonb,  -- [{ name, sets, reps, weight }]
   created_at  timestamptz not null default now()   -- set by the server, can't be faked
 );
 create index on public.posts (team_id, created_at desc);
@@ -101,6 +102,47 @@ create table public.goals (
   )
 );
 create index on public.goals (user_id);
+
+-- Nutrition targets: one row per person. Calories/macros are worked out in the app from
+-- these inputs; the four number columns are optional manual overrides.
+create table public.nutrition_goals (
+  user_id       uuid primary key default auth.uid() references public.profiles(id) on delete cascade,
+  sex           text check (sex in ('male', 'female')),
+  birth_year    int check (birth_year between 1920 and 2020),
+  training_days int check (training_days between 0 and 7),
+  goal          text not null default 'maintain' check (goal in ('cut', 'maintain', 'bulk')),
+  target_weight numeric(5, 1) check (target_weight between 50 and 800),
+  target_date   date,
+  calories      int check (calories between 800 and 8000),
+  protein       int check (protein between 0 and 600),
+  carbs         int check (carbs between 0 and 1500),
+  fat           int check (fat between 0 and 500)
+);
+
+create table public.food_logs (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  eaten_on   date not null default current_date check (eaten_on <= current_date + 1),
+  meal       text not null check (meal in ('breakfast', 'lunch', 'dinner', 'snack')),
+  name       text not null check (char_length(name) between 1 and 120),
+  calories   int not null check (calories between 0 and 5000),
+  protein    numeric(5, 1) not null default 0 check (protein between 0 and 500),
+  carbs      numeric(5, 1) not null default 0 check (carbs between 0 and 1000),
+  fat        numeric(5, 1) not null default 0 check (fat between 0 and 500),
+  created_at timestamptz not null default now()
+);
+create index on public.food_logs (eaten_on, user_id);
+
+create table public.recovery_logs (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  logged_on   date not null default current_date check (logged_on <= current_date + 1),
+  sleep_hours numeric(3, 1) check (sleep_hours between 0 and 24),
+  soreness    int check (soreness between 1 and 5),
+  energy      int check (energy between 1 and 5),
+  created_at  timestamptz not null default now(),
+  unique (user_id, logged_on)
+);
 
 -- ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -166,21 +208,28 @@ grant execute on function public.create_team(text), public.join_team(text), publ
 -- ── Permissions: only columns the app is allowed to write ──────────────
 
 revoke all on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments,
-  public.lift_entries, public.weigh_ins, public.goals from anon;
+  public.lift_entries, public.weigh_ins, public.goals,
+  public.nutrition_goals, public.food_logs, public.recovery_logs from anon;
 revoke insert, update on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments,
-  public.lift_entries, public.weigh_ins, public.goals from authenticated;
+  public.lift_entries, public.weigh_ins, public.goals,
+  public.nutrition_goals, public.food_logs, public.recovery_logs from authenticated;
 
 grant update (name) on public.teams to authenticated;
 grant update (display_name, height_in) on public.profiles to authenticated;
 grant insert (team_id, title, kind, event_date, start_time, location, details) on public.events to authenticated;
 grant update (title, kind, event_date, start_time, location, details) on public.events to authenticated;
-grant insert (team_id, body, event_id, media) on public.posts to authenticated;
+grant insert (team_id, body, event_id, media, exercises) on public.posts to authenticated;
 grant insert (post_id) on public.reactions to authenticated;
 grant insert (post_id, body) on public.comments to authenticated;
 grant insert (lift, value, recorded_on) on public.lift_entries to authenticated;
 grant insert (weight_lbs, recorded_on) on public.weigh_ins to authenticated;
 grant insert (kind, lift, target, body, target_date) on public.goals to authenticated;
 grant update (done, body, target, target_date) on public.goals to authenticated;
+grant insert, update (sex, birth_year, training_days, goal, target_weight, target_date, calories, protein, carbs, fat)
+  on public.nutrition_goals to authenticated;
+grant insert (eaten_on, meal, name, calories, protein, carbs, fat) on public.food_logs to authenticated;
+grant insert (logged_on, sleep_hours, soreness, energy) on public.recovery_logs to authenticated;
+grant update (sleep_hours, soreness, energy) on public.recovery_logs to authenticated;
 
 -- ── Row level security: you only ever see your own crew ────────────────
 
@@ -193,6 +242,9 @@ alter table public.comments  enable row level security;
 alter table public.lift_entries enable row level security;
 alter table public.weigh_ins    enable row level security;
 alter table public.goals        enable row level security;
+alter table public.nutrition_goals enable row level security;
+alter table public.food_logs       enable row level security;
+alter table public.recovery_logs   enable row level security;
 
 create policy "see my team"    on public.teams for select to authenticated using (id = public.my_team_id());
 create policy "rename my team" on public.teams for update to authenticated using (id = public.my_team_id());
@@ -240,6 +292,22 @@ create policy "add my goals"    on public.goals for insert to authenticated with
 create policy "edit my goals"   on public.goals for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "delete my goals" on public.goals for delete to authenticated using (user_id = auth.uid());
 
+-- Nutrition and recovery: visible to the whole crew; only you can change yours.
+create policy "crew targets read" on public.nutrition_goals for select to authenticated
+  using (exists (select 1 from public.profiles p where p.id = user_id));
+create policy "set my targets"    on public.nutrition_goals for insert to authenticated with check (user_id = auth.uid());
+create policy "edit my targets"   on public.nutrition_goals for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create policy "crew food read"   on public.food_logs for select to authenticated
+  using (exists (select 1 from public.profiles p where p.id = user_id));
+create policy "log my food"      on public.food_logs for insert to authenticated with check (user_id = auth.uid());
+create policy "delete my food"   on public.food_logs for delete to authenticated using (user_id = auth.uid());
+
+create policy "crew recovery read" on public.recovery_logs for select to authenticated
+  using (exists (select 1 from public.profiles p where p.id = user_id));
+create policy "log my recovery"    on public.recovery_logs for insert to authenticated with check (user_id = auth.uid());
+create policy "edit my recovery"   on public.recovery_logs for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
 -- ── Photo / video storage (private; files live under <team>/<user>/) ───
 
 insert into storage.buckets (id, name, public, file_size_limit)
@@ -258,4 +326,5 @@ create policy "delete my media" on storage.objects for delete to authenticated
 -- ── Live updates ───────────────────────────────────────────────────────
 
 alter publication supabase_realtime add table public.posts, public.events, public.comments, public.reactions,
-  public.lift_entries, public.weigh_ins, public.goals;
+  public.lift_entries, public.weigh_ins, public.goals,
+  public.nutrition_goals, public.food_logs, public.recovery_logs;
