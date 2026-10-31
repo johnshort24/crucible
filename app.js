@@ -104,6 +104,7 @@ const icon = {
   clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   camera: '<svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  spark: '<svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>',
   food: '<svg viewBox="0 0 24 24"><path d="M7 3v8M4.5 3v5a2.5 2.5 0 0 0 5 0V3M7 11v10M18 3c-2.2 1-3.5 3.6-3.5 7.5H18V21"/></svg>',
   more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
 };
@@ -335,6 +336,12 @@ async function renderToday(seq) {
       <div class="stat"><b>${done}<span class="of">/${members.length}</span></b><small>Crew today</small></div>
     </div>
 
+    <button class="card coach-cta" data-act="coach">
+      <span class="coach-icon">${icon.spark}</span>
+      <span class="grow"><b>Ask Coach</b><small>Am I on track? What should I train today?</small></span>
+      <span class="chev">${icon.chevR}</span>
+    </button>
+
     ${workoutCards}
 
     <button class="card fuel-mini" data-act="nutrition-me">
@@ -548,6 +555,19 @@ async function renderCrew(seq) {
 }
 
 /* ── Profiles ── */
+// On pace for a dated lift goal? Uses the rate of progress over the last ~6 months.
+function liftPace(entries, target, targetDate) {
+  const since = ymd(addDays(new Date(), -180));
+  const recent = entries.filter(e => e.date >= since);
+  if (recent.length < 2) return '<small class="pace">Log another max later to see your pace</small>';
+  const best = recent.reduce((a, b) => (b.value > a.value ? b : a));
+  const days = (parseYmd(best.date) - parseYmd(recent[0].date)) / 864e5;
+  if (days < 14 || best.value <= recent[0].value) return '<small class="pace">Not enough progress logged to project yet</small>';
+  const eta = addDays(parseYmd(best.date), Math.ceil((target - best.value) / ((best.value - recent[0].value) / days)));
+  const ok = ymd(eta) <= targetDate;
+  return `<small class="pace ${ok ? 'ok' : 'behind'}">${ok ? 'On pace' : 'Behind pace'} · at this rate you'll hit it around ${fmt(eta, { month: 'short', day: 'numeric', year: eta.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' })}</small>`;
+}
+
 function goalHtml(g, stats, mine) {
   const best = bestLifts(stats, g.userId);
   let title, progress = '';
@@ -557,8 +577,9 @@ function goalHtml(g, stats, mine) {
     const cur = best[g.lift]?.value ?? 0;
     const pct = Math.min(100, Math.round(cur / g.target * 100));
     title = `${liftName(g.lift)} ${fmtLift(g.lift, g.target)}`;
+    const pace = cur && cur < g.target && g.targetDate ? liftPace(stats.lifts.filter(e => e.userId === g.userId && e.lift === g.lift), g.target, g.targetDate) : '';
     progress = `<div class="progress"><span style="width:${pct}%"></span></div>
-      <small>${cur ? `Now ${fmtLift(g.lift, cur)} · ${cur >= g.target ? 'reached 🎉' : `${fmtLift(g.lift, g.target - cur)} to go`}` : 'No max logged yet'}</small>`;
+      <small>${cur ? `Now ${fmtLift(g.lift, cur)} · ${cur >= g.target ? 'reached 🎉' : `${fmtLift(g.lift, g.target - cur)} to go`}` : 'No max logged yet'}</small>${pace}`;
   } else {
     const w = latestWeighIn(stats, g.userId)?.weight;
     title = `Body weight ${num(g.target)} lb`;
@@ -598,7 +619,7 @@ async function profileHtml(uid) {
       ${avatar(uid, 'xl')}
       <h2>${esc(m.name)}</h2>
       <p class="muted">${facts.length ? facts.join(' · ') : mine ? 'Add your height and weight' : 'No stats yet'}</p>
-      ${mine ? '<button class="btn sm" data-act="edit-profile">Edit profile</button>' : ''}
+      ${mine ? `<div class="btn-row center"><button class="btn sm" data-act="edit-profile">Edit profile</button><button class="btn sm primary" data-act="coach" data-q="Am I on track for my goals?">${icon.spark}Ask Coach</button></div>` : ''}
     </div>
 
     <div class="sec-h"><h3>Maxes</h3>${mine ? '<button class="link" data-act="log-lift">+ Log a lift</button>' : ''}</div>
@@ -867,7 +888,7 @@ async function renderNutrition(seq) {
       </div>
     </section>
     <p class="goal-line muted">${g ? `${GOALS.find(([k]) => k === g.goal)?.[1]}${g.targetWeight ? ` → ${num(g.targetWeight)} lb` : ''}${g.targetDate ? ` by ${fmtShortDate(g.targetDate)}` : ''}${t.custom ? ' · custom targets' : t.perWeek ? ` · ${t.perWeek > 0 ? '+' : ''}${t.perWeek} lb/week` : ''}` : ''}
-      ${mine ? '<button class="link" data-act="edit-targets">Edit targets</button>' : ''}</p>`
+      ${mine ? `<span class="links"><button class="link" data-act="coach" data-q="How is my nutrition this week?">Ask Coach</button><button class="link" data-act="edit-targets">Edit targets</button></span>` : ''}</p>`
     : `<section class="card hero rest">
       <p class="eyebrow">Daily targets</p>
       <h2>${mine ? 'Set your targets' : 'No targets yet'}</h2>
@@ -952,14 +973,19 @@ async function openFoodForm(meal = defaultMeal()) {
       ${MEALS.map(([k, l]) => `<label><input type="radio" name="meal" value="${k}" ${k === meal ? 'checked' : ''}><span>${l}</span></label>`).join('')}
     </div>
     ${quick.length ? `<p class="field-label">Recent</p><div class="chips-scroll quick">${quick.map((f, i) => `<button type="button" class="chip" data-quick="${i}">${esc(f.name)}</button>`).join('')}</div>` : ''}
-    <label class="field"><span>What did you eat?</span><input name="name" required maxlength="120" placeholder="Chicken, rice + broccoli"></label>
+    <label class="field"><span>What did you eat?</span><input name="name" required maxlength="120" placeholder="3 eggs, 2 slices toast, black coffee"></label>
+    <div class="ai-row">
+      <button type="button" class="btn sm primary" data-estimate>${icon.spark}Estimate macros</button>
+      <label class="btn sm ghost">${icon.camera}Photo<input class="vh" type="file" accept="image/*" data-photo></label>
+    </div>
+    <div class="ai-result"></div>
     <div class="two">
       <label class="field"><span>Calories</span>${numIn('calories', '600', 'required')}</label>
       <label class="field"><span>Protein (g)</span>${numIn('protein', '45')}</label>
       <label class="field"><span>Carbs (g)</span>${numIn('carbs', '60')}</label>
       <label class="field"><span>Fat (g)</span>${numIn('fat', '15')}</label>
     </div>
-    <p class="hint">Tip: food labels and restaurant nutrition pages list these. AI estimates from a description or photo are coming in the next update.</p>
+    <p class="hint">Describe the meal or snap a photo and tap Estimate. You can adjust the numbers before adding.</p>
     <button class="btn primary block lg" type="submit">Add</button>`, async f => {
     await S.db.addFood({
       date: nDay(), meal: f.get('meal'), name: f.get('name').trim(),
@@ -968,11 +994,41 @@ async function openFoodForm(meal = defaultMeal()) {
     toast('Logged');
     foodChanged();
   });
+  const form = $('form', sheet);
+  let photo = null;
+  const runEstimate = async () => {
+    const text = form.elements.name.value.trim();
+    if (!text && !photo) return toast('Describe the meal or add a photo first', true);
+    const box = $('.ai-result', sheet);
+    box.innerHTML = `<div class="coach-wait"><div class="spinner"></div><span>Estimating…</span></div>`;
+    try {
+      const res = await S.db.estimateFood({ text, image: photo && await blobToBase64(photo) });
+      if (!res.items.length) { box.innerHTML = `<p class="muted small">${esc(res.note)}</p>`; return; }
+      const tot = sumFood(res.items);
+      if (!text) form.elements.name.value = res.items.map(i => i.name).join(', ').slice(0, 120);
+      form.elements.calories.value = Math.round(tot.calories);
+      for (const k of ['protein', 'carbs', 'fat']) form.elements[k].value = Math.round(tot[k]);
+      box.innerHTML = `<div class="ai-items">${res.items.map(i => `<div><span>${esc(i.name)} <small>${esc(i.portion)}</small></span><b>${num(i.calories)}</b></div>`).join('')}</div>
+        <p class="muted small">${esc(res.note)}${res.remaining != null && res.remaining < 6 ? ` · ${res.remaining} estimates left today` : ''}</p>`;
+    } catch (e) {
+      box.innerHTML = `<p class="small err-text">${esc(e.message)}</p>`;
+    }
+  };
+  $('[data-photo]', sheet).addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      photo = await compressImage(file, 1024);
+      $('.ai-result', sheet).innerHTML = `<img class="ai-photo" src="${URL.createObjectURL(photo)}" alt="">`;
+      runEstimate();
+    } catch (err) { toastErr(err); }
+  });
   sheet.addEventListener('click', e => {
+    if (e.target.closest('[data-estimate]')) return runEstimate();
     const q = e.target.closest('[data-quick]');
     if (!q) return;
     const f = quick[+q.dataset.quick];
-    const form = $('form', sheet);
     form.elements.name.value = f.name;
     for (const k of ['calories', 'protein', 'carbs', 'fat']) form.elements[k].value = f[k];
   });
@@ -1064,6 +1120,108 @@ async function openRecoveryForm() {
     foodChanged();
   });
 }
+
+/* ── Coach ── */
+const COACH_PROMPTS = [
+  'Am I on track for my goals?',
+  'What should I train today?',
+  'How is my nutrition this week?',
+  'How is my recovery?',
+];
+
+// Coach answers use a little markdown: ### headings, - bullets, 1. lists, **bold**, _italic_.
+function mdToHtml(text) {
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|\W)_(.+?)_(?=\W|$)/g, '$1<em>$2</em>');
+  const out = [];
+  let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const h = line.match(/^#{1,4}\s+(.*)/);
+    const ul = line.match(/^[-*•]\s+(.*)/);
+    const ol = line.match(/^\d+[.)]\s+(.*)/);
+    if (h) { close(); out.push(`<h4>${inline(h[1])}</h4>`); }
+    else if (ul || ol) {
+      const tag = ul ? 'ul' : 'ol';
+      if (list !== tag) { close(); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inline((ul ?? ol)[1])}</li>`);
+    } else if (!line) close();
+    else { close(); out.push(`<p>${inline(line)}</p>`); }
+  }
+  close();
+  return out.join('');
+}
+
+async function myTargets() {
+  const [ngoals, stats] = await Promise.all([S.db.nutritionGoals(), S.db.stats()]);
+  const t = targetsFor(S.me.id, ngoals, stats);
+  return t && { calories: t.calories, protein: t.protein, carbs: t.carbs, fat: t.fat };
+}
+
+async function openCoach(prompt) {
+  const sheet = openSheet(`<div class="sheet-body coach">
+    <div class="coach-h">
+      <span class="coach-icon">${icon.spark}</span>
+      <div><h2>Coach</h2><p class="muted">Looks at your lifts, goals, workouts, food and recovery.</p></div>
+    </div>
+    <div class="coach-prompts">${COACH_PROMPTS.map(q => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+    <form class="coach-ask">
+      <textarea name="q" rows="2" maxlength="1000" placeholder="Or ask anything about your training or nutrition…"></textarea>
+      <button class="btn primary">Ask</button>
+    </form>
+    <p class="muted small coach-left"></p>
+    <div class="coach-out"></div>
+    <div class="coach-hist"></div>
+  </div>`);
+  const form = $('form', sheet);
+  const out = $('.coach-out', sheet);
+  let busy = false;
+
+  const showHistory = async () => {
+    try {
+      const hist = await S.db.coachHistory();
+      $('.coach-hist', sheet).innerHTML = hist.length ? `<h3 class="sec">Earlier</h3>${hist.map(h => `<details class="card coach-past">
+        <summary><b>${esc(h.question)}</b><small>${fmtStamp(h.createdAt)}</small></summary>
+        <div class="coach-md">${mdToHtml(h.answer)}</div>
+      </details>`).join('')}` : '';
+    } catch (e) { console.error(e); }
+  };
+
+  const ask = async question => {
+    if (busy || !question.trim()) return;
+    busy = true;
+    form.q.value = '';
+    const btn = $('button', form);
+    btn.disabled = true;
+    out.innerHTML = `<div class="card coach-answer"><p class="coach-q">${esc(question)}</p><div class="coach-wait"><div class="spinner"></div><span>Going through your numbers…</span></div></div>`;
+    try {
+      const res = await S.db.askCoach(question, await myTargets());
+      out.innerHTML = `<div class="card coach-answer"><p class="coach-q">${esc(question)}</p><div class="coach-md">${mdToHtml(res.answer)}</div></div>`;
+      if (res.remaining != null) $('.coach-left', sheet).textContent = res.remaining > 0 ? `${res.remaining} question${res.remaining === 1 ? '' : 's'} left today` : 'That was your last question for today';
+      showHistory();
+    } catch (e) {
+      out.innerHTML = `<div class="card coach-answer err"><p>${esc(e.message)}</p></div>`;
+    } finally {
+      busy = false;
+      btn.disabled = false;
+    }
+  };
+
+  sheet.addEventListener('click', e => {
+    const q = e.target.closest('[data-q]');
+    if (q) ask(q.dataset.q);
+  });
+  form.addEventListener('submit', e => { e.preventDefault(); ask(form.q.value); });
+  showHistory();
+  if (prompt) ask(prompt);
+}
+
+const blobToBase64 = blob => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(',')[1]);
+  r.onerror = () => rej(r.error);
+  r.readAsDataURL(blob);
+});
 
 /* ── Post detail & comments ── */
 async function openPost(id) {
@@ -1452,6 +1610,7 @@ const actions = {
     foodChanged();
   },
   'edit-targets': () => openTargetsForm(),
+  coach: el => { closeSheet(); return openCoach(el.dataset.q); },
   recovery: () => openRecoveryForm(),
   board: el => { S.board = el.dataset.lift; return go('crew', { keep: true }); },
   'edit-profile': () => openEditProfile(),

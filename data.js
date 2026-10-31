@@ -24,6 +24,11 @@ const uuid = () => crypto.randomUUID?.() ??
     return (c === 'x' ? r : (r & 3 | 8)).toString(16);
   });
 
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const extFor = f => f.kind === 'image' ? 'jpg' : (f.type.split('/')[1] || 'mp4').replace('quicktime', 'mov');
 
 function check({ data, error }) {
@@ -155,6 +160,26 @@ class SupabaseBackend {
 
   async setGoalDone(id, done) {
     check(await this.sb.from('goals').update({ done }).eq('id', id));
+  }
+
+  // AI coach and meal estimates run in the `coach` Edge Function (supabase/functions/coach).
+  async ai(body) {
+    const { data, error } = await this.sb.functions.invoke('coach', { body: { ...body, today: localToday() } });
+    if (error) {
+      let msg = null;
+      try { msg = (await error.context.json()).error; } catch { /* not a JSON error */ }
+      throw new Error(msg || "Couldn't reach the coach. Check your connection and try again.");
+    }
+    return data;
+  }
+
+  async askCoach(question, targets) { return this.ai({ action: 'coach', question, targets }); }
+  async estimateFood({ text, image }) { return this.ai({ action: 'food', text, image }); }
+
+  async coachHistory() {
+    const rows = check(await this.sb.from('ai_requests').select('question, answer, created_at')
+      .eq('user_id', this.uid).eq('kind', 'coach').order('created_at', { ascending: false }).limit(10));
+    return rows.map(r => ({ question: r.question, answer: r.answer, createdAt: r.created_at }));
   }
 
   async nutritionGoals() {
@@ -428,6 +453,28 @@ class LocalBackend {
   }
   async setGoalDone(id, done) { this.d.goals.find(g => g.id === id).done = done; this.save(); }
 
+  async askCoach(question, targets) {
+    await new Promise(r => setTimeout(r, 900));
+    const answer = demoCoachAnswer(this.d, question, targets);
+    (this.d.coach ??= []).unshift({ question, answer, createdAt: new Date().toISOString() });
+    this.save();
+    return { answer, remaining: null };
+  }
+
+  async estimateFood({ text }) {
+    await new Promise(r => setTimeout(r, 600));
+    const t = (text || '').toLowerCase();
+    const items = DEMO_FOODS.filter(([re]) => re.test(t))
+      .map(([, name, portion, calories, protein, carbs, fat]) => ({ name, portion, calories, protein, carbs, fat }));
+    return {
+      items: items.length ? items : [{ name: text || 'Meal from photo', portion: '1 plate', calories: 550, protein: 35, carbs: 55, fat: 18 }],
+      note: 'Demo mode uses a small built-in food list. The real AI handles any meal or photo.',
+      remaining: null,
+    };
+  }
+
+  async coachHistory() { return this.d.coach ?? []; }
+
   async nutritionGoals() { return Object.values(this.d.ngoals); }
   async saveNutritionGoal(g) { this.d.ngoals[this.d.me] = { ...g, userId: this.d.me }; this.save(); }
 
@@ -553,6 +600,67 @@ class LocalBackend {
   }
 
   subscribe() { return () => {}; }
+}
+
+const DEMO_FOODS = [
+  [/egg/, 'Eggs', '3 large', 215, 19, 1, 15], [/toast|bread/, 'Toast', '2 slices', 160, 6, 28, 2],
+  [/chicken/, 'Chicken breast', '6 oz', 280, 52, 0, 6], [/rice/, 'White rice', '1 cup', 205, 4, 45, 0],
+  [/shake|whey/, 'Protein shake', '1 scoop + water', 120, 25, 3, 1], [/oat/, 'Oatmeal', '1 cup cooked', 165, 6, 28, 4],
+  [/banana/, 'Banana', '1 medium', 105, 1, 27, 0], [/steak/, 'Sirloin steak', '8 oz', 460, 62, 0, 22],
+  [/salmon/, 'Salmon', '6 oz', 350, 34, 0, 22], [/chipotle|burrito bowl/, 'Chipotle chicken bowl', 'regular', 750, 55, 80, 22],
+  [/pizza/, 'Pepperoni pizza', '2 slices', 600, 26, 68, 26], [/burger/, 'Cheeseburger', '1', 550, 30, 40, 30],
+  [/coffee/, 'Black coffee', '12 oz', 5, 0, 0, 0], [/yogurt/, 'Greek yogurt', '1 cup', 150, 23, 9, 1],
+  [/potato/, 'Baked potato', '1 medium', 160, 4, 37, 0], [/broccoli/, 'Broccoli', '1 cup', 30, 3, 6, 0],
+];
+
+// Demo-mode stand-in for the AI coach, built from the on-device sample data.
+function demoCoachAnswer(d, question, targets) {
+  const me = d.me;
+  const pad = n => String(n).padStart(2, '0');
+  const ymd = x => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
+  const today = ymd(new Date());
+  const name = { bench: 'Bench', squat: 'Squat', deadlift: 'Deadlift', ohp: 'Overhead press', pullup: 'Pull-ups' };
+  const unit = l => l === 'pullup' ? 'reps' : 'lb';
+  const lifts = d.lifts.filter(l => l.userId === me).sort((a, b) => a.date.localeCompare(b.date));
+  const best = l => lifts.filter(x => x.lift === l).reduce((a, b) => (!a || b.value > a.value ? b : a), null);
+  const out = [];
+
+  const goals = d.goals.filter(g => g.userId === me && !g.done);
+  out.push('### Your goals');
+  if (!goals.length) out.push('- No goals set yet. Add one on your profile (for example **Bench 275 by March 1**) and I\'ll track your pace.');
+  for (const g of goals) {
+    if (g.kind === 'lift') {
+      const b = best(g.lift);
+      out.push(b
+        ? `- **${name[g.lift]} ${g.target} ${unit(g.lift)}**${g.targetDate ? ` by ${g.targetDate}` : ''}: your best is **${b.value} ${unit(g.lift)}** (${b.date}). ${b.value >= g.target ? 'Goal reached 🎉' : `${g.target - b.value} ${unit(g.lift)} to go. Log a new max every 2–3 weeks so I can project your pace.`}`
+        : `- **${name[g.lift]} ${g.target}**: log your current max so I can track it.`);
+    } else out.push(`- **${g.text ?? `Body weight ${g.target} lb`}**: keep logging and I'll check in on it.`);
+  }
+
+  const plan = d.events.find(e => e.date === today && e.kind === 'workout');
+  out.push('', '### Today');
+  if (plan) {
+    out.push(`- The crew plan is **${plan.title}**.`);
+    const first = (plan.details || '').split('\n')[0];
+    const key = Object.keys(name).find(k => first.toLowerCase().includes(k === 'ohp' ? 'overhead' : k));
+    const b = key && best(key);
+    if (b && key !== 'pullup') out.push(`- ${first}: aim for **${Math.round(b.value * 0.8 / 5) * 5} lb** (about 80% of your ${b.value} max). Add 5–10 lb next time if every rep is clean.`);
+  } else out.push('- Nothing scheduled. A good day for a 20–30 minute walk and mobility work.');
+
+  const recent = d.food.filter(f => f.userId === me && f.date > ymd(new Date(Date.now() - 7 * 864e5)));
+  const days = new Set(recent.map(f => f.date)).size;
+  out.push('', '### Nutrition');
+  if (days) {
+    const avg = k => Math.round(recent.reduce((s, f) => s + f[k], 0) / days);
+    out.push(`- You've averaged **${avg('calories')} kcal** and **${avg('protein')} g protein** on the ${days} day${days > 1 ? 's' : ''} you logged${targets ? `, against targets of ${targets.calories} kcal and ${targets.protein} g` : ''}.`);
+    if (targets && avg('protein') < targets.protein * 0.9) out.push(`- Protein is short by about **${targets.protein - avg('protein')} g/day**. A shake plus Greek yogurt covers most of it.`);
+  } else out.push('- No meals logged this week yet. Log for 3–4 days and I can tell you how close you are to your targets.');
+
+  const rec = d.recovery.filter(r => r.userId === me).sort((a, b) => b.date.localeCompare(a.date))[0];
+  if (rec?.sleep != null) out.push('', '### Recovery', rec.sleep < 7 ? `- Only **${rec.sleep} h** of sleep last check-in. Aim for 7+; keep today's top sets at RPE 7.` : `- **${rec.sleep} h** of sleep. Good, you're cleared to push today.`);
+
+  out.push('', `_Demo mode: a sample answer to “${question}” built from the demo data. The real coach reads everything you log and answers any question._`);
+  return out.join('\n');
 }
 
 function seed() {

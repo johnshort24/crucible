@@ -144,6 +144,18 @@ create table public.recovery_logs (
   unique (user_id, logged_on)
 );
 
+-- AI coach usage: one row per coach question or meal estimate. Used for the daily limits,
+-- and coach answers are kept so people can look back. Private to each person.
+create table public.ai_requests (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  kind       text not null check (kind in ('coach', 'food')),
+  question   text check (char_length(question) <= 2000),
+  answer     text check (char_length(answer) <= 20000),
+  created_at timestamptz not null default now()
+);
+create index on public.ai_requests (user_id, kind, created_at desc);
+
 -- ── Helpers ─────────────────────────────────────────────────────────────
 
 create or replace function public.my_team_id() returns uuid
@@ -209,10 +221,11 @@ grant execute on function public.create_team(text), public.join_team(text), publ
 
 revoke all on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments,
   public.lift_entries, public.weigh_ins, public.goals,
-  public.nutrition_goals, public.food_logs, public.recovery_logs from anon;
+  public.nutrition_goals, public.food_logs, public.recovery_logs, public.ai_requests from anon;
 revoke insert, update on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments,
   public.lift_entries, public.weigh_ins, public.goals,
-  public.nutrition_goals, public.food_logs, public.recovery_logs from authenticated;
+  public.nutrition_goals, public.food_logs, public.recovery_logs, public.ai_requests from authenticated;
+revoke delete on public.ai_requests from authenticated;  -- history can't be cleared to dodge the daily limit
 
 grant update (name) on public.teams to authenticated;
 grant update (display_name, height_in) on public.profiles to authenticated;
@@ -230,6 +243,7 @@ grant insert, update (sex, birth_year, training_days, goal, target_weight, targe
 grant insert (eaten_on, meal, name, calories, protein, carbs, fat) on public.food_logs to authenticated;
 grant insert (logged_on, sleep_hours, soreness, energy) on public.recovery_logs to authenticated;
 grant update (sleep_hours, soreness, energy) on public.recovery_logs to authenticated;
+grant insert (kind, question, answer) on public.ai_requests to authenticated;
 
 -- ── Row level security: you only ever see your own crew ────────────────
 
@@ -245,6 +259,7 @@ alter table public.goals        enable row level security;
 alter table public.nutrition_goals enable row level security;
 alter table public.food_logs       enable row level security;
 alter table public.recovery_logs   enable row level security;
+alter table public.ai_requests     enable row level security;
 
 create policy "see my team"    on public.teams for select to authenticated using (id = public.my_team_id());
 create policy "rename my team" on public.teams for update to authenticated using (id = public.my_team_id());
@@ -307,6 +322,9 @@ create policy "crew recovery read" on public.recovery_logs for select to authent
   using (exists (select 1 from public.profiles p where p.id = user_id));
 create policy "log my recovery"    on public.recovery_logs for insert to authenticated with check (user_id = auth.uid());
 create policy "edit my recovery"   on public.recovery_logs for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create policy "my coach history" on public.ai_requests for select to authenticated using (user_id = auth.uid());
+create policy "record my requests" on public.ai_requests for insert to authenticated with check (user_id = auth.uid());
 
 -- ── Photo / video storage (private; files live under <team>/<user>/) ───
 
