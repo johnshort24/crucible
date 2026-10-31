@@ -5,7 +5,8 @@ A clean, iPhone-first app for a training group that can't always lift together b
 - **Today:** the day's workout (exercise list, time, gym), a one-tap **Log this workout** button, and a crew check-in showing who has trained today and what time they posted.
 - **Feed:** everyone's posts with notes, photos and videos. Each post is timestamped by the server when it's shared, so the time can't be faked. Tap 💪 to react, 💬 to comment.
 - **Calendar:** month view with workouts, get-togethers and other events. Add events with an exercise list, optionally repeating weekly. Each day shows who trained.
-- **Crew:** invite code to share, a weekly leaderboard with streaks, and your profile.
+- **Profiles:** after joining, each person fills in their own height, weight, maxes (bench, squat, deadlift, overhead press, pull-ups) and goals. Tap anyone to see their stats, goals, dated PR history and weigh-ins. Only you can edit your own.
+- **Crew:** a lift board ranking everyone by each lift or Big 3 total, a weekly workout leaderboard with streaks, and the invite code to share.
 
 It's a web app you install from Safari, so you don't need the App Store or an Apple developer account. Once added to the home screen it opens full-screen like a normal app.
 

@@ -15,6 +15,7 @@ create table public.teams (
 create table public.profiles (
   id           uuid primary key references auth.users(id) on delete cascade,
   display_name text not null check (char_length(display_name) between 1 and 40),
+  height_in    int check (height_in between 36 and 108),
   team_id      uuid references public.teams(id) on delete set null,
   created_at   timestamptz not null default now()
 );
@@ -60,6 +61,46 @@ create table public.comments (
   created_at timestamptz not null default now()
 );
 create index on public.comments (post_id, created_at);
+
+-- Each lift entry is one max on one date; the history of entries is the PR history.
+-- Weights are in lbs; pull-ups are max reps.
+create table public.lift_entries (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  lift        text not null check (lift in ('bench', 'squat', 'deadlift', 'ohp', 'pullup')),
+  value       numeric(6, 1) not null check (value > 0 and value < 2000),
+  recorded_on date not null default current_date check (recorded_on <= current_date + 1),
+  created_at  timestamptz not null default now()
+);
+create index on public.lift_entries (user_id, lift, recorded_on);
+
+create table public.weigh_ins (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  weight_lbs  numeric(5, 1) not null check (weight_lbs between 50 and 800),
+  recorded_on date not null default current_date check (recorded_on <= current_date + 1),
+  created_at  timestamptz not null default now()
+);
+create index on public.weigh_ins (user_id, recorded_on);
+
+-- kind 'text': a written goal. 'lift': reach target on a lift. 'weight': reach a body weight.
+create table public.goals (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references public.profiles(id) on delete cascade,
+  kind        text not null check (kind in ('text', 'lift', 'weight')),
+  lift        text check (lift in ('bench', 'squat', 'deadlift', 'ohp', 'pullup')),
+  target      numeric(6, 1) check (target > 0 and target < 2000),
+  body        text check (char_length(body) <= 300),
+  target_date date,
+  done        boolean not null default false,
+  created_at  timestamptz not null default now(),
+  check (
+    (kind = 'text' and body is not null) or
+    (kind = 'lift' and lift is not null and target is not null) or
+    (kind = 'weight' and target is not null)
+  )
+);
+create index on public.goals (user_id);
 
 -- ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -124,16 +165,22 @@ grant execute on function public.create_team(text), public.join_team(text), publ
 
 -- ── Permissions: only columns the app is allowed to write ──────────────
 
-revoke all on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments from anon;
-revoke insert, update on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments from authenticated;
+revoke all on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments,
+  public.lift_entries, public.weigh_ins, public.goals from anon;
+revoke insert, update on public.teams, public.profiles, public.events, public.posts, public.reactions, public.comments,
+  public.lift_entries, public.weigh_ins, public.goals from authenticated;
 
 grant update (name) on public.teams to authenticated;
-grant update (display_name) on public.profiles to authenticated;
+grant update (display_name, height_in) on public.profiles to authenticated;
 grant insert (team_id, title, kind, event_date, start_time, location, details) on public.events to authenticated;
 grant update (title, kind, event_date, start_time, location, details) on public.events to authenticated;
 grant insert (team_id, body, event_id, media) on public.posts to authenticated;
 grant insert (post_id) on public.reactions to authenticated;
 grant insert (post_id, body) on public.comments to authenticated;
+grant insert (lift, value, recorded_on) on public.lift_entries to authenticated;
+grant insert (weight_lbs, recorded_on) on public.weigh_ins to authenticated;
+grant insert (kind, lift, target, body, target_date) on public.goals to authenticated;
+grant update (done, body, target, target_date) on public.goals to authenticated;
 
 -- ── Row level security: you only ever see your own crew ────────────────
 
@@ -143,6 +190,9 @@ alter table public.events    enable row level security;
 alter table public.posts     enable row level security;
 alter table public.reactions enable row level security;
 alter table public.comments  enable row level security;
+alter table public.lift_entries enable row level security;
+alter table public.weigh_ins    enable row level security;
+alter table public.goals        enable row level security;
 
 create policy "see my team"    on public.teams for select to authenticated using (id = public.my_team_id());
 create policy "rename my team" on public.teams for update to authenticated using (id = public.my_team_id());
@@ -173,6 +223,23 @@ create policy "comment as me" on public.comments for insert to authenticated
   with check (user_id = auth.uid() and exists (select 1 from public.posts p where p.id = post_id));
 create policy "delete my comments" on public.comments for delete to authenticated using (user_id = auth.uid());
 
+-- Stats: the whole crew can see them (a profile is only visible to teammates); only you can change yours.
+create policy "crew lifts read"   on public.lift_entries for select to authenticated
+  using (exists (select 1 from public.profiles p where p.id = user_id));
+create policy "log my lifts"      on public.lift_entries for insert to authenticated with check (user_id = auth.uid());
+create policy "delete my lifts"   on public.lift_entries for delete to authenticated using (user_id = auth.uid());
+
+create policy "crew weigh-ins read" on public.weigh_ins for select to authenticated
+  using (exists (select 1 from public.profiles p where p.id = user_id));
+create policy "log my weigh-ins"    on public.weigh_ins for insert to authenticated with check (user_id = auth.uid());
+create policy "delete my weigh-ins" on public.weigh_ins for delete to authenticated using (user_id = auth.uid());
+
+create policy "crew goals read" on public.goals for select to authenticated
+  using (exists (select 1 from public.profiles p where p.id = user_id));
+create policy "add my goals"    on public.goals for insert to authenticated with check (user_id = auth.uid());
+create policy "edit my goals"   on public.goals for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "delete my goals" on public.goals for delete to authenticated using (user_id = auth.uid());
+
 -- ── Photo / video storage (private; files live under <team>/<user>/) ───
 
 insert into storage.buckets (id, name, public, file_size_limit)
@@ -190,4 +257,5 @@ create policy "delete my media" on storage.objects for delete to authenticated
 
 -- ── Live updates ───────────────────────────────────────────────────────
 
-alter publication supabase_realtime add table public.posts, public.events, public.comments, public.reactions;
+alter publication supabase_realtime add table public.posts, public.events, public.comments, public.reactions,
+  public.lift_entries, public.weigh_ins, public.goals;

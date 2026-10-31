@@ -101,14 +101,64 @@ class SupabaseBackend {
     this.teamId = null;
   }
 
-  async renameMe(name) {
-    check(await this.sb.from('profiles').update({ display_name: name }).eq('id', this.uid));
+  async updateProfile({ name, heightIn }) {
+    check(await this.sb.from('profiles')
+      .update({ display_name: name, height_in: heightIn ?? null }).eq('id', this.uid));
   }
 
   async members() {
     const rows = check(await this.sb.from('profiles')
-      .select('id, display_name').eq('team_id', this.teamId).order('display_name'));
-    return rows.map(r => ({ id: r.id, name: r.display_name }));
+      .select('id, display_name, height_in').eq('team_id', this.teamId).order('display_name'));
+    return rows.map(r => ({ id: r.id, name: r.display_name, heightIn: r.height_in }));
+  }
+
+  // Lifts, weigh-ins and goals for the whole crew (row level security limits it to teammates).
+  async stats() {
+    const [l, w, g] = await Promise.all([
+      this.sb.from('lift_entries').select('id, user_id, lift, value, recorded_on, created_at')
+        .order('recorded_on').order('created_at'),
+      this.sb.from('weigh_ins').select('id, user_id, weight_lbs, recorded_on, created_at')
+        .order('recorded_on').order('created_at'),
+      this.sb.from('goals').select('*').order('created_at'),
+    ]);
+    return {
+      lifts: check(l).map(r => ({ id: r.id, userId: r.user_id, lift: r.lift, value: +r.value, date: r.recorded_on, createdAt: r.created_at })),
+      weighins: check(w).map(r => ({ id: r.id, userId: r.user_id, weight: +r.weight_lbs, date: r.recorded_on, createdAt: r.created_at })),
+      goals: check(g).map(r => ({
+        id: r.id, userId: r.user_id, kind: r.kind, lift: r.lift, target: r.target == null ? null : +r.target,
+        text: r.body, targetDate: r.target_date, done: r.done, createdAt: r.created_at,
+      })),
+    };
+  }
+
+  async addLift({ lift, value, date }) {
+    check(await this.sb.from('lift_entries').insert({ lift, value, recorded_on: date }));
+  }
+
+  async deleteLift(id) {
+    check(await this.sb.from('lift_entries').delete().eq('id', id));
+  }
+
+  async addWeighIn({ weight, date }) {
+    check(await this.sb.from('weigh_ins').insert({ weight_lbs: weight, recorded_on: date }));
+  }
+
+  async deleteWeighIn(id) {
+    check(await this.sb.from('weigh_ins').delete().eq('id', id));
+  }
+
+  async addGoal({ kind, lift, target, text, targetDate }) {
+    check(await this.sb.from('goals').insert({
+      kind, lift: lift || null, target: target ?? null, body: text || null, target_date: targetDate || null,
+    }));
+  }
+
+  async setGoalDone(id, done) {
+    check(await this.sb.from('goals').update({ done }).eq('id', id));
+  }
+
+  async deleteGoal(id) {
+    check(await this.sb.from('goals').delete().eq('id', id));
   }
 
   async signedUrls(paths) {
@@ -236,6 +286,9 @@ class SupabaseBackend {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events', filter }, () => onChange('events'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'comments' }, () => onChange('comments'))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'reactions' }, () => onChange('reactions'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lift_entries' }, () => onChange('stats'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weigh_ins' }, () => onChange('stats'))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'goals' }, () => onChange('stats'))
       .subscribe();
     return () => this.sb.removeChannel(ch);
   }
@@ -243,7 +296,7 @@ class SupabaseBackend {
 
 /* ───────────────────────── Demo (on-device) ───────────────────────── */
 
-const LS_KEY = 'crucible-demo-v1';
+const LS_KEY = 'crucible-demo-v2';
 
 function idb() {
   return new Promise((res, rej) => {
@@ -280,8 +333,41 @@ class LocalBackend {
   }
 
   async signOut() {}
-  async renameMe(name) { this.member(this.d.me).name = name; this.save(); }
-  async members() { return this.d.members.map(({ id, name }) => ({ id, name })); }
+  async updateProfile({ name, heightIn }) {
+    Object.assign(this.member(this.d.me), { name, heightIn: heightIn ?? null });
+    this.save();
+  }
+
+  async members() { return this.d.members.map(({ id, name, heightIn }) => ({ id, name, heightIn })); }
+
+  async stats() {
+    const byDate = (a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt);
+    return {
+      lifts: [...this.d.lifts].sort(byDate),
+      weighins: [...this.d.weighins].sort(byDate),
+      goals: [...this.d.goals],
+    };
+  }
+
+  add(list, item) {
+    this.d[list].push({ ...item, id: uuid(), userId: this.d.me, createdAt: new Date().toISOString() });
+    this.save();
+  }
+
+  remove(list, id) {
+    this.d[list] = this.d[list].filter(x => x.id !== id);
+    this.save();
+  }
+
+  async addLift({ lift, value, date }) { this.add('lifts', { lift, value, date }); }
+  async deleteLift(id) { this.remove('lifts', id); }
+  async addWeighIn({ weight, date }) { this.add('weighins', { weight, date }); }
+  async deleteWeighIn(id) { this.remove('weighins', id); }
+  async addGoal(g) {
+    this.add('goals', { kind: g.kind, lift: g.lift || null, target: g.target ?? null, text: g.text || null, targetDate: g.targetDate || null, done: false });
+  }
+  async setGoalDone(id, done) { this.d.goals.find(g => g.id === id).done = done; this.save(); }
+  async deleteGoal(id) { this.remove('goals', id); }
 
   async reset() {
     localStorage.removeItem(LS_KEY);
@@ -457,9 +543,33 @@ function seed() {
     comments.push({ id: 'c1', postId: latest.id, userId: 'm5', body: "Let's go!! 🔥", createdAt: new Date(Date.parse(latest.createdAt) + 5 * 60000).toISOString() });
   }
 
+  // Stats for the sample crew. "You" starts empty so the profile setup shows.
+  const lifts = [];
+  const weighins = [];
+  const goals = [];
+  const r5 = x => Math.round(x / 5) * 5;
+  const stamp = d => new Date(d.getTime() + 12 * 3600000).toISOString();
+  members.slice(1).forEach((m, mi) => {
+    m.heightIn = 67 + Math.floor(rand() * 9);
+    const bench = r5(185 + rand() * 130);
+    const top = { bench, squat: r5(bench * 1.3), deadlift: r5(bench * 1.6), ohp: r5(bench * 0.62), pullup: 8 + Math.floor(rand() * 12) };
+    [[-120, 0.88], [-60, 0.94], [-12, 1]].forEach(([d, f], k) => {
+      for (const [lift, v] of Object.entries(top)) {
+        lifts.push({ id: `l${mi}${lift}${k}`, userId: m.id, lift, value: lift === 'pullup' ? Math.round(v * f) : r5(v * f), date: ymd(day(d)), createdAt: stamp(day(d)) });
+      }
+    });
+    let w = 165 + Math.floor(rand() * 60);
+    for (let k = 5; k >= 0; k--) {
+      weighins.push({ id: `w${mi}${k}`, userId: m.id, weight: w, date: ymd(day(-k * 7)), createdAt: stamp(day(-k * 7)) });
+      w += Math.round((rand() - 0.6) * 4);
+    }
+    goals.push({ id: `g${mi}a`, userId: m.id, kind: 'lift', lift: 'bench', target: r5(bench + 30), text: null, targetDate: null, done: false, createdAt: stamp(day(-30)) });
+    if (mi % 2 === 0) goals.push({ id: `g${mi}b`, userId: m.id, kind: 'text', lift: null, target: null, text: 'Run a sub-25 minute 5K', targetDate: null, done: false, createdAt: stamp(day(-20)) });
+  });
+
   return {
     me: 'me',
     team: { id: 'demo', name: 'Iron Crew', code: 'DEMO42' },
-    members, events, posts, reactions, comments,
+    members, events, posts, reactions, comments, lifts, weighins, goals,
   };
 }

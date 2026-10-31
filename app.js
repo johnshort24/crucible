@@ -40,6 +40,8 @@ const S = {
   posts: new Map(),
   events: new Map(),
   tab: 'today',
+  board: 'total',
+  stats: null,
   calMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
   calDay: todayYmd(),
   cal: null,
@@ -209,7 +211,7 @@ function postCard(p) {
   const mine = p.userId === S.me.id;
   return `<article class="card post" data-id="${p.id}">
     <header class="post-h">
-      ${avatar(p.userId)}
+      <button class="av-btn" data-act="profile" data-id="${p.userId}" aria-label="${esc(nameOf(p.userId))}'s profile">${avatar(p.userId)}</button>
       <div class="grow"><b>${esc(nameOf(p.userId))}</b><time datetime="${p.createdAt}">${icon.clock}${fmtStamp(p.createdAt)}</time></div>
       ${mine ? `<button class="icon-btn" data-act="post-menu" data-id="${p.id}" aria-label="Post options">${icon.more}</button>` : ''}
     </header>
@@ -294,7 +296,7 @@ async function renderToday(seq) {
     <header class="top">
       <div><p class="eyebrow">${fmt(now, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
       <h1>${greet}, ${esc(S.me.name.split(' ')[0])}</h1></div>
-      <button class="av-btn" data-act="tab" data-tab="crew" aria-label="Your crew">${avatar(S.me.id, 'lg')}</button>
+      <button class="av-btn" data-act="profile" data-id="${S.me.id}" aria-label="My profile">${avatar(S.me.id, 'lg')}</button>
     </header>
 
     <div class="stats">
@@ -417,11 +419,36 @@ async function renderCalendar(seq) {
   </div>`;
 }
 
+/* ── Stats helpers ── */
+const LIFTS = [['bench', 'Bench'], ['squat', 'Squat'], ['deadlift', 'Deadlift'], ['ohp', 'Overhead press'], ['pullup', 'Pull-ups']];
+const BIG3 = ['bench', 'squat', 'deadlift'];
+const liftName = l => LIFTS.find(([k]) => k === l)?.[1] ?? l;
+const num = v => (Math.round(v * 10) / 10).toLocaleString();
+const fmtLift = (lift, v) => lift === 'pullup' ? `${num(v)} reps` : `${num(v)} lb`;
+const fmtHeight = h => h ? `${Math.floor(h / 12)}′${h % 12}″` : null;
+const fmtShortDate = s => fmt(parseYmd(s), { month: 'short', day: 'numeric', year: parseYmd(s).getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+
+// Best entry per lift for one person: { bench: entry, ... }
+function bestLifts(stats, uid) {
+  const best = {};
+  for (const e of stats.lifts) {
+    if (e.userId !== uid) continue;
+    if (!best[e.lift] || e.value > best[e.lift].value) best[e.lift] = e;
+  }
+  return best;
+}
+
+const latestWeighIn = (stats, uid) => stats.weighins.filter(w => w.userId === uid).at(-1);
+
 /* ── Crew ── */
 async function renderCrew(seq) {
   const now = new Date();
-  const act = await S.db.activity(addDays(startOfDay(now), -60).toISOString());
+  const [act, stats] = await Promise.all([
+    S.db.activity(addDays(startOfDay(now), -60).toISOString()),
+    S.db.stats(),
+  ]);
   if (stale(seq)) return;
+  S.stats = stats;
   const days = daysByUser(act);
   const weekStart = ymd(startOfWeek(now));
   const rows = [...S.members.values()].map(m => {
@@ -429,37 +456,289 @@ async function renderCrew(seq) {
     return { ...m, week: [...(d ?? [])].filter(x => x >= weekStart).length, streak: streakOf(d) };
   }).sort((a, b) => b.week - a.week || b.streak - a.streak || a.name.localeCompare(b.name));
 
+  const board = [...S.members.values()].map(m => {
+    const best = bestLifts(stats, m.id);
+    if (S.board === 'total') {
+      const have = BIG3.filter(l => best[l]);
+      return { m, value: have.length === 3 ? have.reduce((s, l) => s + best[l].value, 0) : null, note: have.length === 3 ? BIG3.map(l => num(best[l].value)).join(' / ') : 'Needs bench, squat and deadlift' };
+    }
+    const e = best[S.board];
+    return { m, value: e?.value ?? null, note: e ? fmtShortDate(e.date) : 'No max logged' };
+  }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1) || a.m.name.localeCompare(b.m.name));
+  const boardUnit = v => v == null ? '—' : S.board === 'pullup' ? `${num(v)}<small>reps</small>` : `${num(v)}<small>lb</small>`;
+
   app.innerHTML = `<div class="v-crew">
-    <header class="top"><div><p class="eyebrow">Your crew</p><h1>${esc(S.team.name)}</h1></div></header>
+    <header class="top">
+      <div><p class="eyebrow">Your crew</p><h1>${esc(S.team.name)}</h1></div>
+      <button class="av-btn" data-act="profile" data-id="${S.me.id}" aria-label="My profile">${avatar(S.me.id, 'lg')}</button>
+    </header>
     ${isDemo ? `<section class="card demo">
       <b>Demo mode</b>
       <p>You're looking at a sample crew and everything stays on this phone. Follow the setup guide (README) to connect Supabase so your whole crew can sign in and share.</p>
       <button class="btn sm" data-act="reset-demo">Reset demo data</button>
     </section>` : ''}
+    <section class="card list">
+      <div class="sec-h"><h3>Lift board</h3><button class="link" data-act="profile" data-id="${S.me.id}">My stats</button></div>
+      <div class="chips-scroll">
+        ${[['total', 'Big 3 total'], ...LIFTS].map(([k, label]) => `<button class="chip ${S.board === k ? 'on' : ''}" data-act="board" data-lift="${k}">${label}</button>`).join('')}
+      </div>
+      ${board.map((r, i) => `<button class="row" data-act="profile" data-id="${r.m.id}">
+        <span class="rank">${r.value == null ? '' : i + 1}</span>${avatar(r.m.id)}
+        <span class="grow"><b>${esc(r.m.name)}${r.m.id === S.me.id ? ' <em>(you)</em>' : ''}</b><small>${esc(r.note)}</small></span>
+        <span class="count lift">${boardUnit(r.value)}</span>
+      </button>`).join('')}
+    </section>
+    <section class="card list">
+      <div class="sec-h"><h3>This week</h3><span class="muted">Workouts since Monday</span></div>
+      ${rows.map((r, i) => `<button class="row" data-act="profile" data-id="${r.id}">
+        <span class="rank">${i + 1}</span>${avatar(r.id)}
+        <span class="grow"><b>${esc(r.name)}${r.id === S.me.id ? ' <em>(you)</em>' : ''}</b><small>${r.streak ? `🔥 ${r.streak}-day streak` : 'No active streak'}</small></span>
+        <span class="count">${r.week}</span>
+      </button>`).join('')}
+    </section>
     <section class="card invite">
       <div><p class="eyebrow">Invite code</p><p class="code">${esc(S.team.code)}</p><p class="muted">Send this code to your crew. They sign up and enter it to join.</p></div>
       <button class="btn primary" data-act="share-code">Share</button>
     </section>
-    <section class="card list">
-      <div class="sec-h"><h3>This week</h3><span class="muted">Workouts since Monday</span></div>
-      ${rows.map((r, i) => `<div class="row static">
-        <span class="rank">${i + 1}</span>${avatar(r.id)}
-        <span class="grow"><b>${esc(r.name)}${r.id === S.me.id ? ' <em>(you)</em>' : ''}</b><small>${r.streak ? `🔥 ${r.streak}-day streak` : 'No active streak'}</small></span>
-        <span class="count">${r.week}</span>
-      </div>`).join('')}
-    </section>
-    <section class="card">
-      <h3>Your profile</h3>
-      <form class="inline-form" data-form="rename">
-        <input name="name" value="${esc(S.me.name)}" maxlength="40" required aria-label="Display name">
-        <button class="btn">Save</button>
-      </form>
-      ${isDemo ? '' : `<div class="btn-row">
-        <button class="btn ghost" data-act="signout">Sign out</button>
-        <button class="btn ghost danger" data-act="leave">Leave crew</button>
-      </div>`}
-    </section>
+    ${isDemo ? '' : `<div class="btn-row">
+      <button class="btn ghost" data-act="signout">Sign out</button>
+      <button class="btn ghost danger" data-act="leave">Leave crew</button>
+    </div>`}
   </div>`;
+}
+
+/* ── Profiles ── */
+function goalHtml(g, stats, mine) {
+  const best = bestLifts(stats, g.userId);
+  let title, progress = '';
+  if (g.kind === 'text') {
+    title = esc(g.text);
+  } else if (g.kind === 'lift') {
+    const cur = best[g.lift]?.value ?? 0;
+    const pct = Math.min(100, Math.round(cur / g.target * 100));
+    title = `${liftName(g.lift)} ${fmtLift(g.lift, g.target)}`;
+    progress = `<div class="progress"><span style="width:${pct}%"></span></div>
+      <small>${cur ? `Now ${fmtLift(g.lift, cur)} · ${cur >= g.target ? 'reached 🎉' : `${fmtLift(g.lift, g.target - cur)} to go`}` : 'No max logged yet'}</small>`;
+  } else {
+    const w = latestWeighIn(stats, g.userId)?.weight;
+    title = `Body weight ${num(g.target)} lb`;
+    progress = `<small>${w ? `Now ${num(w)} lb · ${Math.abs(w - g.target) < 0.5 ? 'reached 🎉' : `${num(Math.abs(w - g.target))} lb to go`}` : 'No weigh-in yet'}</small>`;
+  }
+  const due = g.targetDate ? `<small>By ${fmtShortDate(g.targetDate)}</small>` : '';
+  return `<div class="goal ${g.done ? 'done' : ''}">
+    ${mine ? `<button class="check ${g.done ? 'on' : ''}" data-act="goal-done" data-id="${g.id}" aria-label="Mark done">${icon.check}</button>` : `<span class="check ${g.done ? 'on' : ''}">${icon.check}</span>`}
+    <div class="grow"><b>${title}</b>${progress}${due}</div>
+    ${mine ? `<button class="icon-btn" data-act="del-goal" data-id="${g.id}" aria-label="Delete goal">✕</button>` : ''}
+  </div>`;
+}
+
+async function profileHtml(uid) {
+  const stats = await S.db.stats();
+  S.stats = stats;
+  const m = S.members.get(uid) ?? { name: 'Former member' };
+  const mine = uid === S.me.id;
+  const best = bestLifts(stats, uid);
+  const weighins = stats.weighins.filter(w => w.userId === uid);
+  const lw = weighins.at(-1);
+  const goals = stats.goals.filter(g => g.userId === uid).sort((a, b) => a.done - b.done);
+  const total = BIG3.every(l => best[l]) ? BIG3.reduce((s, l) => s + best[l].value, 0) : null;
+
+  // PR history: newest first; mark entries that beat everything before them.
+  const hist = [];
+  const top = {};
+  for (const e of stats.lifts.filter(x => x.userId === uid)) {
+    hist.push({ ...e, pr: !top[e.lift] || e.value > top[e.lift] });
+    top[e.lift] = Math.max(top[e.lift] ?? 0, e.value);
+  }
+  hist.reverse();
+
+  const facts = [fmtHeight(m.heightIn), lw ? `${num(lw.weight)} lb` : null, total ? `${num(total)} lb Big 3` : null].filter(Boolean);
+
+  return `<div class="prof-h">
+      ${avatar(uid, 'xl')}
+      <h2>${esc(m.name)}</h2>
+      <p class="muted">${facts.length ? facts.join(' · ') : mine ? 'Add your height and weight' : 'No stats yet'}</p>
+      ${mine ? '<button class="btn sm" data-act="edit-profile">Edit profile</button>' : ''}
+    </div>
+
+    <div class="sec-h"><h3>Maxes</h3>${mine ? '<button class="link" data-act="log-lift">+ Log a lift</button>' : ''}</div>
+    <div class="lift-grid">
+      ${LIFTS.map(([k, label]) => {
+        const e = best[k];
+        return `<${mine ? `button data-act="log-lift" data-lift="${k}"` : 'div'} class="lift-tile">
+          <small>${label}</small>
+          <b>${e ? `${num(e.value)}<span>${k === 'pullup' ? 'reps' : 'lb'}</span>` : '—'}</b>
+          <small>${e ? fmtShortDate(e.date) : mine ? 'Tap to add' : '&nbsp;'}</small>
+        </${mine ? 'button' : 'div'}>`;
+      }).join('')}
+    </div>
+
+    <div class="sec-h"><h3>Goals</h3>${mine ? '<button class="link" data-act="add-goal">+ Add goal</button>' : ''}</div>
+    <div class="card list-tight">${goals.length ? goals.map(g => goalHtml(g, stats, mine)).join('') : `<p class="muted">${mine ? 'No goals yet. Add one so the crew can hold you to it.' : 'No goals yet.'}</p>`}</div>
+
+    <div class="sec-h"><h3>Weigh-ins</h3>${mine ? '<button class="link" data-act="log-weight">+ Log weight</button>' : ''}</div>
+    <div class="card list-tight">${weighins.length ? [...weighins].reverse().slice(0, 12).map((w, i, arr) => {
+      const prev = arr[i + 1];
+      const d = prev ? w.weight - prev.weight : 0;
+      return `<div class="hist">
+        <span class="grow"><b>${num(w.weight)} lb</b><small>${fmtShortDate(w.date)}</small></span>
+        ${prev && d ? `<span class="delta ${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : '−'}${num(Math.abs(d))}</span>` : ''}
+        ${mine ? `<button class="icon-btn" data-act="del-weight" data-id="${w.id}" aria-label="Delete weigh-in">✕</button>` : ''}
+      </div>`;
+    }).join('') : '<p class="muted">No weigh-ins yet.</p>'}</div>
+
+    <div class="sec-h"><h3>PR history</h3></div>
+    <div class="card list-tight">${hist.length ? hist.map(e => `<div class="hist">
+        <span class="grow"><b>${liftName(e.lift)} · ${fmtLift(e.lift, e.value)}</b><small>${fmtShortDate(e.date)}</small></span>
+        ${e.pr ? '<span class="pr">PR</span>' : ''}
+        ${mine ? `<button class="icon-btn" data-act="del-lift" data-id="${e.id}" aria-label="Delete entry">✕</button>` : ''}
+      </div>`).join('') : '<p class="muted">No lifts logged yet.</p>'}</div>`;
+}
+
+async function openProfile(uid) {
+  const sheet = openSheet('<div class="sheet-body profile"><div class="spinner"></div></div>');
+  sheet.reload = async () => { $('.profile', sheet).innerHTML = await profileHtml(uid); };
+  try { await sheet.reload(); } catch (e) { toastErr(e); }
+}
+
+// After any stats change: redraw open profiles, and the Crew tab when its sheet closes.
+function statsChanged() {
+  document.querySelectorAll('.sheet').forEach(s => s.reload?.());
+  if (S.tab === 'crew') S.dirty = true;
+}
+
+function heightFields(h) {
+  const ft = h ? Math.floor(h / 12) : '';
+  const inch = h ? h % 12 : '';
+  return `<div class="two">
+    <label class="field"><span>Height (ft)</span><select name="ft"><option value=""></option>${[4, 5, 6, 7].map(v => `<option ${v === ft ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <label class="field"><span>Height (in)</span><select name="in"><option value=""></option>${Array.from({ length: 12 }, (_, v) => `<option ${v === inch ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+  </div>`;
+}
+const readHeight = f => f.get('ft') ? +f.get('ft') * 12 + +(f.get('in') || 0) : null;
+const numIn = (name, ph, extra = '') => `<input name="${name}" type="number" inputmode="decimal" step="any" min="0" placeholder="${ph}" ${extra}>`;
+
+function formSheet(html, onSubmit) {
+  const sheet = openSheet(`<form class="sheet-body">${html}</form>`);
+  const form = $('form', sheet);
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = $('button[type=submit]', form);
+    btn.disabled = true;
+    try {
+      await onSubmit(new FormData(form));
+      closeSheet(sheet);
+      statsChanged();
+    } catch (err) { btn.disabled = false; toastErr(err); }
+  });
+  return sheet;
+}
+
+function openEditProfile() {
+  formSheet(`<h2>Edit profile</h2>
+    <label class="field"><span>Name</span><input name="name" required maxlength="40" value="${esc(S.me.name)}"></label>
+    ${heightFields(S.members.get(S.me.id)?.heightIn)}
+    <button class="btn primary block lg" type="submit">Save</button>`, async f => {
+    await S.db.updateProfile({ name: f.get('name').trim(), heightIn: readHeight(f) });
+    await loadMembers();
+    toast('Profile saved');
+    S.dirty = true;
+  });
+}
+
+function openLiftForm(lift = 'bench') {
+  const sheet = formSheet(`<h2>Log a lift</h2>
+    <label class="field"><span>Lift</span><select name="lift">${LIFTS.map(([k, l]) => `<option value="${k}" ${k === lift ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    <div class="two">
+      <label class="field"><span class="unit-label">${lift === 'pullup' ? 'Max reps' : 'Max (lb)'}</span>${numIn('value', lift === 'pullup' ? '15' : '225', 'required')}</label>
+      <label class="field"><span>Date</span><input type="date" name="date" required value="${todayYmd()}" max="${todayYmd()}"></label>
+    </div>
+    <p class="hint">Your best one-rep max${lift === 'pullup' ? '' : ' (or best set)'}. Pull-ups are max reps in one set.</p>
+    <button class="btn primary block lg" type="submit">Save</button>`, async f => {
+    const l = f.get('lift');
+    const best = bestLifts(S.stats ?? { lifts: [] }, S.me.id)[l]?.value ?? 0;
+    const value = +f.get('value');
+    await S.db.addLift({ lift: l, value, date: f.get('date') });
+    toast(value > best && best ? `New ${liftName(l)} PR! 🔥` : 'Saved');
+  });
+  $('select[name=lift]', sheet).addEventListener('change', e => {
+    $('.unit-label', sheet).textContent = e.target.value === 'pullup' ? 'Max reps' : 'Max (lb)';
+  });
+}
+
+function openWeighInForm() {
+  formSheet(`<h2>Log weight</h2>
+    <div class="two">
+      <label class="field"><span>Weight (lb)</span>${numIn('weight', '185', 'required')}</label>
+      <label class="field"><span>Date</span><input type="date" name="date" required value="${todayYmd()}" max="${todayYmd()}"></label>
+    </div>
+    <button class="btn primary block lg" type="submit">Save</button>`, async f => {
+    await S.db.addWeighIn({ weight: +f.get('weight'), date: f.get('date') });
+    toast('Saved');
+  });
+}
+
+function openGoalForm() {
+  const sheet = formSheet(`<h2>New goal</h2>
+    <div class="seg" role="radiogroup" aria-label="Goal type">
+      <label><input type="radio" name="kind" value="lift" checked><span>Lift</span></label>
+      <label><input type="radio" name="kind" value="weight"><span>Body weight</span></label>
+      <label><input type="radio" name="kind" value="text"><span>Other</span></label>
+    </div>
+    <div data-for="lift" class="two">
+      <label class="field"><span>Lift</span><select name="lift">${LIFTS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+      <label class="field"><span>Target</span>${numIn('liftTarget', '275')}</label>
+    </div>
+    <label class="field" data-for="weight" hidden><span>Target weight (lb)</span>${numIn('weightTarget', '185')}</label>
+    <label class="field" data-for="text" hidden><span>Goal</span><input name="text" maxlength="300" placeholder="Run a sub-25 minute 5K"></label>
+    <label class="field"><span>Target date <em>optional</em></span><input type="date" name="targetDate"></label>
+    <button class="btn primary block lg" type="submit">Add goal</button>`, async f => {
+    const kind = f.get('kind');
+    const goal = { kind, targetDate: f.get('targetDate') || null };
+    if (kind === 'lift') Object.assign(goal, { lift: f.get('lift'), target: +f.get('liftTarget') });
+    if (kind === 'weight') goal.target = +f.get('weightTarget');
+    if (kind === 'text') goal.text = f.get('text').trim();
+    if (kind === 'text' ? !goal.text : !(goal.target > 0)) throw new Error('Fill in your goal first');
+    await S.db.addGoal(goal);
+    toast('Goal added');
+  });
+  sheet.addEventListener('change', e => {
+    if (e.target.name !== 'kind') return;
+    sheet.querySelectorAll('[data-for]').forEach(el => { el.hidden = el.dataset.for !== e.target.value; });
+  });
+}
+
+// First-run profile setup, shown once after joining a crew.
+const setupKey = () => `crucible-setup-done-${S.me.id}`;
+function seenSetup() { try { return !!localStorage.getItem(setupKey()); } catch { return true; } }
+function markSetup() { try { localStorage.setItem(setupKey(), '1'); } catch { /* private mode */ } }
+
+async function maybeSetup() {
+  if (seenSetup()) return;
+  const stats = await S.db.stats();
+  if (S.members.get(S.me.id)?.heightIn || stats.lifts.some(l => l.userId === S.me.id)) return markSetup();
+  markSetup();
+  formSheet(`<h2>Set up your profile</h2>
+    <p class="muted intro">Your crew will see these. You can change them any time from your profile.</p>
+    <label class="field"><span>Name</span><input name="name" required maxlength="40" value="${esc(S.me.name)}"></label>
+    ${heightFields(null)}
+    <label class="field"><span>Weight (lb)</span>${numIn('weight', '185')}</label>
+    <h3 class="sec">Current maxes</h3>
+    <div class="two">
+      ${LIFTS.map(([k, l]) => `<label class="field"><span>${l}${k === 'pullup' ? ' (reps)' : ' (lb)'}</span>${numIn(`lift_${k}`, '—')}</label>`).join('')}
+    </div>
+    <label class="field"><span>Your goal <em>optional</em></span><input name="goal" maxlength="300" placeholder="Bench 275 by summer, drop 10 lb…"></label>
+    <button class="btn primary block lg" type="submit">Save profile</button>
+    <button class="btn ghost block skip" type="button" data-close>Skip for now</button>`, async f => {
+    const date = todayYmd();
+    await S.db.updateProfile({ name: f.get('name').trim(), heightIn: readHeight(f) });
+    if (+f.get('weight') > 0) await S.db.addWeighIn({ weight: +f.get('weight'), date });
+    for (const [k] of LIFTS) if (+f.get(`lift_${k}`) > 0) await S.db.addLift({ lift: k, value: +f.get(`lift_${k}`), date });
+    if (f.get('goal').trim()) await S.db.addGoal({ kind: 'text', text: f.get('goal').trim() });
+    await loadMembers();
+    toast('Profile saved 💪');
+    S.dirty = true;
+  });
 }
 
 /* ── Post detail & comments ── */
@@ -800,6 +1079,31 @@ const actions = {
     await S.db.leaveTeam();
     location.reload();
   },
+  profile: (el, id) => openProfile(id),
+  board: el => { S.board = el.dataset.lift; return go('crew', { keep: true }); },
+  'edit-profile': () => openEditProfile(),
+  'log-lift': el => openLiftForm(el.dataset.lift),
+  'log-weight': () => openWeighInForm(),
+  'add-goal': () => openGoalForm(),
+  'goal-done': async (el, id) => {
+    await S.db.setGoalDone(id, !el.classList.contains('on'));
+    statsChanged();
+  },
+  'del-goal': async (el, id) => {
+    if (!confirm('Delete this goal?')) return;
+    await S.db.deleteGoal(id);
+    statsChanged();
+  },
+  'del-lift': async (el, id) => {
+    if (!confirm('Delete this lift entry?')) return;
+    await S.db.deleteLift(id);
+    statsChanged();
+  },
+  'del-weight': async (el, id) => {
+    if (!confirm('Delete this weigh-in?')) return;
+    await S.db.deleteWeighIn(id);
+    statsChanged();
+  },
   'reset-demo': async () => {
     if (!confirm('Reset all demo data?')) return;
     await S.db.reset();
@@ -814,19 +1118,6 @@ document.addEventListener('click', async e => {
   if (!fn) return;
   e.preventDefault();
   try { await fn(el, el.dataset.id, e); } catch (err) { toastErr(err); }
-});
-
-document.addEventListener('submit', async e => {
-  const form = e.target.closest('[data-form=rename]');
-  if (!form) return;
-  e.preventDefault();
-  const name = form.name.value.trim();
-  if (!name) return;
-  try {
-    await S.db.renameMe(name);
-    toast('Name updated');
-    refresh();
-  } catch (err) { toastErr(err); }
 });
 
 /* ── Auth & onboarding ── */
@@ -912,7 +1203,8 @@ async function route(sess) {
     }, 500);
   });
   tabbar.hidden = false;
-  go(S.tab);
+  await go(S.tab);
+  maybeSetup().catch(toastErr);
 }
 
 /* ── Boot ── */
