@@ -1,4 +1,4 @@
-# Squad: crew workout tracker
+# Crucible: crew workout tracker
 
 A clean, iPhone-first app for a training group that can't always lift together but does the same program.
 
@@ -44,7 +44,7 @@ The anon key is designed to be public. Your crew's data is protected by the data
 
 1. Open the link above in **Safari**.
 2. Tap the **Share** button, then **Add to Home Screen**, then **Add**.
-3. Open **Squad** from your home screen, create an account, and tap **Start a new crew**.
+3. Open **Crucible** from your home screen, create an account, and tap **Start a new crew**.
 4. On the **Crew** tab, tap **Share** to send the invite code to the guys. They follow the same steps and choose **Join a crew**.
 
 ## Day-to-day

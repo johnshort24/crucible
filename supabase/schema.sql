@@ -1,4 +1,4 @@
--- Squad database setup.
+-- Crucible database setup.
 -- Paste this whole file into Supabase → SQL Editor → New query, then click Run.
 -- Run it once on a fresh project.
 

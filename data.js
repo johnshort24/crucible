@@ -243,11 +243,11 @@ class SupabaseBackend {
 
 /* ───────────────────────── Demo (on-device) ───────────────────────── */
 
-const LS_KEY = 'squad-demo-v1';
+const LS_KEY = 'crucible-demo-v1';
 
 function idb() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('squad-demo-media', 1);
+    const r = indexedDB.open('crucible-demo-media', 1);
     r.onupgradeneeded = () => r.result.createObjectStore('m');
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);

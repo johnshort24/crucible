@@ -1,6 +1,6 @@
 {
-  "name": "Squad",
-  "short_name": "Squad",
+  "name": "Crucible",
+  "short_name": "Crucible",
   "description": "Track your crew's workouts, photos, videos and schedule.",
   "start_url": "./",
   "scope": "./",

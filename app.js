@@ -783,9 +783,9 @@ const actions = {
   },
   'share-code': async () => {
     const url = location.href.split('#')[0];
-    const text = `Join ${S.team.name} on Squad! Open ${url} , create an account, and enter invite code ${S.team.code}`;
+    const text = `Join ${S.team.name} on Crucible! Open ${url} , create an account, and enter invite code ${S.team.code}`;
     if (navigator.share) {
-      try { await navigator.share({ title: 'Join my crew on Squad', text }); } catch { /* cancelled */ }
+      try { await navigator.share({ title: 'Join my crew on Crucible', text }); } catch { /* cancelled */ }
     } else {
       await navigator.clipboard.writeText(text);
       toast('Invite copied');
@@ -833,7 +833,7 @@ document.addEventListener('submit', async e => {
 function renderAuth(mode = 'in', msg = '') {
   tabbar.hidden = true;
   app.innerHTML = `<div class="auth">
-    <div class="brand"><img src="icons/icon.svg" alt=""><h1>Squad</h1><p>Train together, even when you're apart.</p></div>
+    <div class="brand"><img src="icons/icon.svg" alt=""><h1>Crucible</h1><p>Train together, even when you're apart.</p></div>
     <form class="card auth-form">
       <div class="seg">
         <label><input type="radio" name="mode" value="in" ${mode === 'in' ? 'checked' : ''}><span>Sign in</span></label>
